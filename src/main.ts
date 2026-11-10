@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { version as appVersion } from "../src-tauri/tauri.conf.json";
 import { indexShortcut, rankShortcutMatches } from "./shortcut_search";
 import "./style.css";
 
@@ -17,8 +18,13 @@ type Shortcut = {
 
 type TileKind = "submenu" | "text" | "folder" | "webpage" | "app";
 type EditableTileKind = TileKind | "file";
+const tileNameHints: Partial<Record<EditableTileKind, string>> = {
+  app: "(Leave blank for icon only)",
+  text: "(Optional · defaults to the first 12 characters)",
+  webpage: "(Leave blank for icon only)",
+};
 type TileSelection = { item: Omit<Shortcut, "preview">; level: number };
-type EditorTab = "tiles" | "edit-tile" | "appearance" | "theme" | "misc";
+type EditorTab = "tiles" | "edit-tile" | "appearance" | "theme" | "misc" | "about";
 type InstalledApp = { name: string; path: string };
 const tileDefinitions: { kind: TileKind; label: string; detail: string }[] = [
   { kind: "submenu", label: "Submenu", detail: "Group related shortcuts in a focused view" },
@@ -36,6 +42,18 @@ const themeColors: { key: ThemeColor; label: string; light: string; dark: string
   { key: "background", label: "Palette background", light: "#f0f2f5", dark: "#181818" },
   { key: "highlight", label: "Tile highlight", light: "#90c7fb", dark: "#5ba9f2" },
   { key: "border", label: "Tile border", light: "#a3aeb9", dark: "#3b3b3b" },
+];
+const themePresets: { id: string; label: string; colors: Record<ThemeColor, string> }[] = [
+  { id: "graphite", label: "Graphite", colors: { background: "#181818", highlight: "#d4d4d4", border: "#606060" } },
+  { id: "indigo", label: "Indigo Night", colors: { background: "#191b2c", highlight: "#abb5f5", border: "#5a6289" } },
+  { id: "forest", label: "Forest", colors: { background: "#182620", highlight: "#9bd9b0", border: "#517968" } },
+  { id: "ember", label: "Ember", colors: { background: "#29201c", highlight: "#ffc28a", border: "#8b6351" } },
+  { id: "rosewood", label: "Rosewood", colors: { background: "#2b1e27", highlight: "#f0aec8", border: "#875d73" } },
+  { id: "porcelain", label: "Porcelain", colors: { background: "#f4f1ea", highlight: "#2a6466", border: "#8d9d96" } },
+  { id: "deep-ocean", label: "Deep Ocean", colors: { background: "#14252c", highlight: "#76d8e4", border: "#467782" } },
+  { id: "amethyst", label: "Amethyst", colors: { background: "#241b31", highlight: "#d9b7fa", border: "#755b8d" } },
+  { id: "sandstone", label: "Sandstone", colors: { background: "#f4ead9", highlight: "#79501f", border: "#b3a18a" } },
+  { id: "frost", label: "Frost", colors: { background: "#eaf2f8", highlight: "#315b89", border: "#8a9fb6" } },
 ];
 const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -142,6 +160,12 @@ function applyPreferences() {
     const swatchValue = app.querySelector<HTMLElement>(`[data-theme-value="${key}"]`);
     if (swatchValue) swatchValue.textContent = color.toUpperCase();
   }
+  const presetSelect = app.querySelector<HTMLSelectElement>("#theme-preset");
+  if (presetSelect) {
+    const preset = themePresets.find(({ colors }) => themeColors.every(({ key, ...defaults }) =>
+      (theme[key] ?? defaults[mode]).toLowerCase() === colors[key]));
+    presetSelect.value = preset?.id ?? "";
+  }
   root.toggleAttribute("data-custom-highlight", theme.highlight !== null);
   if (theme.border) root.style.setProperty("--palette-custom-border", theme.border);
   else root.style.removeProperty("--palette-custom-border");
@@ -211,7 +235,17 @@ function childrenOf(parentId: string | null): Shortcut[] {
   return shortcuts.filter((item) => (item.parentId ?? null) === parentId);
 }
 
-function shortcutName(item: Shortcut): string {
+function shortcutName(item: Pick<Shortcut, "kind" | "name" | "path" | "text">): string {
+  if (item.kind === "text" && !item.name) {
+    return Array.from(item.text?.trimStart() ?? "").slice(0, 12).join("").trimEnd() || "Whitespace";
+  }
+  if (item.kind === "webpage" && !item.name) {
+    try {
+      return new URL(item.path).hostname || "Webpage";
+    } catch {
+      return "Webpage";
+    }
+  }
   return item.name || item.path.split(/[\\/]/).pop()?.replace(/\.(exe|lnk)$/i, "") || "App";
 }
 
@@ -863,7 +897,10 @@ function appendTile(
       : icon(item.kind);
     tileIcon = `<span class="shortcut-icon ${item.kind}">${thumbnail}</span>`;
   }
-  button.innerHTML = `${tileIcon}${item.name || searching ? '<span class="shortcut-label"></span>' : ""}${editing ? '<span class="remove-badge">×</span>' : ""}`;
+  const removeBadge = editing ? `<span class="remove-badge" title="Remove">
+    <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3L3 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+  </span>` : "";
+  button.innerHTML = `${tileIcon}${item.name || item.kind === "text" || searching ? '<span class="shortcut-label"></span>' : ""}${removeBadge}`;
   if (!item.preview && (item.kind === "app" || item.kind === "webpage")) {
     loadShortcutIcon(item, button.querySelector<HTMLElement>(".shortcut-icon")!);
   }
@@ -1211,7 +1248,10 @@ function tileValueFields(kind: EditableTileKind, id: string) {
     <textarea id="${id}" name="value" rows="5" placeholder="Type or paste text here" required></textarea>`;
   const label = kind === "webpage" ? "Webpage URL" : kind === "folder" ? "Folder path" : kind === "file" ? "File path" : "App path (.exe or .lnk)";
   return `
-    ${kind === "app" ? `<label for="${id}-apps">Installed apps</label><select id="${id}-apps" class="installed-apps" size="4"><option value="">Loading apps…</option></select>` : ""}
+    ${kind === "app" ? `<label for="${id}-apps">Installed apps</label>
+    <input id="${id}-apps" class="installed-apps" type="text" list="${id}-app-options" placeholder="Loading apps…" autocomplete="off" spellcheck="false" disabled />
+    <datalist id="${id}-app-options"></datalist>
+    <div class="app-source-divider">or</div>` : ""}
     <label for="${id}">${label}</label>
     <div class="tile-path-row">
       <input id="${id}" name="value" type="text" required spellcheck="false" placeholder="${kind === "webpage" ? "https://example.com" : "Choose or paste a path"}" />
@@ -1219,29 +1259,51 @@ function tileValueFields(kind: EditableTileKind, id: string) {
     </div>`;
 }
 
-function bindTileValueFields(form: HTMLFormElement, fields: HTMLElement, kind: EditableTileKind, fillAppName: boolean) {
+function bindTileValueFields(form: HTMLFormElement, fields: HTMLElement, kind: EditableTileKind, fillSuggestedName: boolean) {
+  const name = form.querySelector<HTMLInputElement>('[name="name"]')!;
   const value = fields.querySelector<HTMLInputElement | HTMLTextAreaElement>('[name="value"]');
-  const appSelect = fields.querySelector<HTMLSelectElement>(".installed-apps");
-  if (appSelect && value) {
+  const appSearch = fields.querySelector<HTMLInputElement>(".installed-apps");
+  const appOptions = fields.querySelector<HTMLDataListElement>("datalist");
+  if (appSearch && appOptions && value) {
     void invoke<InstalledApp[]>("list_installed_apps").then((items) => {
-      appSelect.replaceChildren(new Option(items.length ? "Choose an installed app" : "No Start Menu apps found; browse or paste a path", ""));
-      items.forEach((item) => appSelect.add(new Option(item.name, item.path)));
-      appSelect.value = items.some((item) => item.path === value.value) ? value.value : "";
-      appSelect.addEventListener("change", () => {
-        const selected = items.find((item) => item.path === appSelect.value);
+      if (!appSearch.isConnected) return;
+      const nameCounts = new Map<string, number>();
+      for (const item of items) {
+        const key = item.name.toLowerCase();
+        nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+      }
+      const choices = new Map(items.map((item) => [
+        nameCounts.get(item.name.toLowerCase()) === 1 ? item.name : `${item.name} — ${item.path}`,
+        item,
+      ]));
+      appOptions.replaceChildren(...Array.from(choices.keys(), (label) => new Option(label, label)));
+      appSearch.placeholder = items.length ? "Search installed apps" : "No Start Menu apps found";
+      appSearch.disabled = !items.length;
+      const labelsByPath = new Map(Array.from(choices, ([label, item]) => [item.path, label]));
+      const syncSearch = () => { appSearch.value = labelsByPath.get(value.value) ?? ""; };
+      syncSearch();
+      value.addEventListener("input", syncSearch);
+      appSearch.addEventListener("input", () => {
+        const selected = choices.get(appSearch.value);
         if (!selected) return;
         value.value = selected.path;
-        const name = form.querySelector<HTMLInputElement>('[name="name"]')!;
-        if (fillAppName && !name.value.trim()) name.value = selected.name;
+        if (fillSuggestedName && !name.value.trim()) name.value = selected.name;
       });
     }).catch(() => {
-      appSelect.replaceChildren(new Option("Browse or paste an app path", ""));
+      appSearch.placeholder = "Browse or paste an app path below";
     });
   }
   fields.querySelector<HTMLButtonElement>(".tile-browse")?.addEventListener("click", async () => {
     try {
       const path = await invoke<string | null>("pick_tile_path", { kind });
-      if (path && value?.isConnected) value.value = path;
+      if (path && value?.isConnected) {
+        value.value = path;
+        if (kind === "folder" && fillSuggestedName && !name.value.trim()) {
+          const folderName = path.replace(/[\\/]+$/, "").split(/[\\/]/).pop()?.trim() ?? "";
+          name.value = Array.from(folderName).slice(0, name.maxLength).join("");
+        }
+        value.dispatchEvent(new Event("input"));
+      }
     } catch (error) {
       form.querySelector<HTMLElement>(".tile-form-error")!.textContent = String(error);
     }
@@ -1254,6 +1316,7 @@ function editableKind(kind: Shortcut["kind"]): EditableTileKind {
 }
 
 const settingsIconPaths = {
+  about: "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0zM12 11v5m0-8h.01",
   tiles: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z",
   "edit-tile": "m13.5 6.5 4 4M4 20l4.5-1 11-11a2.8 2.8 0 0 0-4-4l-11 11L4 20z",
   appearance: "M3 6h5m4 0h9M3 12h9m4 0h5M3 18h3m4 0h11M8 4v4m8 2v4M6 16v4",
@@ -1288,7 +1351,7 @@ function selectedTileForm(selection: TileSelection) {
       <select id="edit-tile-kind" name="kind">
         ${types.filter(({ kind }) => kind !== "submenu" || selection.level < 2).map(({ kind, label }) => `<option value="${kind}">${label}</option>`).join("")}
       </select>
-      <label for="edit-tile-name">Name</label>
+      <label for="edit-tile-name">Name <small class="tile-name-hint" hidden></small></label>
       <input id="edit-tile-name" name="name" type="text" maxlength="80" autocomplete="off" />
       <div class="tile-fields"></div>
       <div class="tile-form-error" role="alert"></div>
@@ -1299,18 +1362,24 @@ function selectedTileForm(selection: TileSelection) {
 function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
   const type = form.querySelector<HTMLSelectElement>('[name="kind"]')!;
   const name = form.querySelector<HTMLInputElement>('[name="name"]')!;
+  const nameHint = form.querySelector<HTMLElement>(".tile-name-hint")!;
   const fields = form.querySelector<HTMLElement>(".tile-fields")!;
   const error = form.querySelector<HTMLElement>(".tile-form-error")!;
   const save = form.querySelector<HTMLButtonElement>(".tile-save")!;
   const { item } = selection;
   let kind = editableKind(item.kind);
-  app.querySelector<HTMLElement>("[data-selection-name]")!.textContent = item.name || tileDefinitions.find((tile) => tile.kind === kind)?.label || "File";
+  app.querySelector<HTMLElement>("[data-selection-name]")!.textContent = item.kind === "text"
+    ? shortcutName(item)
+    : item.name || tileDefinitions.find((tile) => tile.kind === kind)?.label || "File";
   const selectionKind = app.querySelector<HTMLElement>("[data-selection-kind]")!;
   const values = new Map<EditableTileKind, string>([[kind, kind === "text" ? item.text ?? "" : item.path]]);
   let value: HTMLInputElement | HTMLTextAreaElement | null;
   const renderFields = () => {
     selectionKind.textContent = type.selectedOptions[0]?.textContent ?? "";
-    name.placeholder = kind === "app" ? "Leave blank for icon only" : "Optional name";
+    const hint = tileNameHints[kind];
+    nameHint.textContent = hint ?? "";
+    nameHint.hidden = !hint;
+    name.placeholder = hint ? "" : "Optional name";
     fields.innerHTML = tileValueFields(kind, "edit-tile-value");
     value = bindTileValueFields(form, fields, kind, false);
     if (value) value.value = values.get(kind) ?? "";
@@ -1353,7 +1422,9 @@ function displayHotkey(combination: string) {
 }
 
 function renderEditor() {
-  const tabs = [["tiles", "Tiles"], ["edit-tile", "Edit tile"], ["appearance", "Appearance"], ["theme", "Theme"], ["misc", "Behavior"]] as const;
+  const nameRequired = tileForm?.kind === "folder";
+  const nameHint = nameRequired ? "(Required)" : tileForm ? tileNameHints[tileForm.kind] : undefined;
+  const tabs = [["tiles", "Tiles"], ["edit-tile", "Edit tile"], ["appearance", "Appearance"], ["theme", "Theme"], ["misc", "Behavior"], ["about", "About"]] as const;
   app.innerHTML = `
     <section class="settings" aria-label="Palette settings">
       <div class="settings-tabs" role="tablist" aria-label="Settings sections">
@@ -1380,18 +1451,20 @@ function renderEditor() {
             ${sliderDefinitions.filter((definition) => definition.group === group).map(({ key, label, min, max }) => `
               <div class="setting-range">
                 <label for="setting-${key}">${label}</label>
-                <span class="setting-value" data-value="${key}">${appearance[key]} px</span>
+                <span class="setting-value setting-stepper">
+                  <input id="setting-${key}-value" type="number" aria-label="${label} in pixels" min="${min}" max="${max}" step="1" value="${appearance[key]}" />
+                  <span aria-hidden="true">px</span>
+                </span>
                 <input id="setting-${key}" data-key="${key}" type="range" min="${min}" max="${max}" value="${appearance[key]}" />
               </div>`).join("")}
           </div>`).join("")}
       </div>` : editorTab === "theme" ? `<div class="theme-panel" id="theme-panel" role="tabpanel" aria-label="Theme">
-        ${settingsHeading("Theme", "Choose a color mode and customize the palette.")}
+        ${settingsHeading("Theme", "Choose a preset or customize the palette colors.")}
         <div class="setting-row">
-          <label for="theme-mode">Mode</label>
-          <select id="theme-mode">
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
+          <label for="theme-preset">Preset</label>
+          <select id="theme-preset">
+            <option value="" disabled>Custom</option>
+            ${themePresets.map(({ id, label }) => `<option value="${id}">${label}</option>`).join("")}
           </select>
         </div>
         ${themeColors.map(({ key, label }) => `
@@ -1403,7 +1476,7 @@ function renderEditor() {
             </span>
           </div>
         `).join("")}
-      </div>` : `<div id="misc-panel" role="tabpanel" aria-label="Behavior">
+      </div>` : editorTab === "misc" ? `<div id="misc-panel" role="tabpanel" aria-label="Behavior">
         ${settingsHeading("Behavior", "Control how the palette opens and moves.")}
         <h2 class="settings-group-heading">Shortcut</h2>
         <div class="setting-row">
@@ -1424,6 +1497,13 @@ function renderEditor() {
           <span>Cast shadow</span>
           <input id="palette-cast-shadow" class="setting-switch" type="checkbox" role="switch" ${appearance.castShadow ? "checked" : ""} />
         </label>
+      </div>` : `<div id="about-panel" role="tabpanel" aria-label="About">
+        <header class="settings-heading"><h1>About Radial</h1></header>
+        <dl class="about-details">
+          <div class="setting-row"><dt>Version</dt><dd>${appVersion}</dd></div>
+          <div class="setting-row"><dt>Author</dt><dd>Vee Jay</dd></div>
+        </dl>
+        <p class="setting-note">© 2026 Vee Jay</p>
       </div>`}
       <div class="settings-status" role="status" aria-live="polite"></div>
       </div>
@@ -1432,8 +1512,8 @@ function renderEditor() {
       <form id="tile-create-form" class="tile-form" aria-label="Add ${tileForm.kind} tile">
         <h2>Add ${tileDefinitions.find((item) => item.kind === tileForm!.kind)!.label}</h2>
         <p>Slot ${tileForm.index + 1} ${tileForm.parentId ? "in the submenu" : "on the root ring"}</p>
-        <label for="tile-name">Name</label>
-        <input id="tile-name" name="name" type="text" maxlength="80" placeholder="${tileForm.kind === "app" ? "Leave blank for icon only" : "Optional name"}" autocomplete="off" />
+        <label for="tile-name">Name${nameHint ? ` <small class="tile-name-hint">${nameHint}</small>` : ""}</label>
+        <input id="tile-name" name="name" type="text" maxlength="80" ${nameRequired ? "required" : nameHint ? "" : 'placeholder="Optional name"'} autocomplete="off" />
         <div class="tile-fields">${tileValueFields(tileForm.kind, "tile-value")}</div>
         <div class="tile-form-error" role="alert"></div>
         <div class="tile-form-actions"><button class="tile-cancel" type="button">Cancel</button><button class="tile-save" type="submit">Save tile</button></div>
@@ -1498,11 +1578,12 @@ function renderEditor() {
     previewAppearance();
     scheduleAppearanceSave(true);
   });
-  const mode = app.querySelector<HTMLSelectElement>("#theme-mode");
-  if (mode) {
-    mode.value = appearance.theme.mode;
-    mode.addEventListener("change", () => {
-      appearance.theme.mode = mode.value as ThemeMode;
+  const presetSelect = app.querySelector<HTMLSelectElement>("#theme-preset");
+  if (presetSelect) {
+    presetSelect.addEventListener("change", () => {
+      const preset = themePresets.find(({ id }) => id === presetSelect.value);
+      if (!preset) return;
+      Object.assign(appearance.theme, preset.colors);
       applyPreferences();
       previewAppearance();
       scheduleAppearanceSave(true);
@@ -1572,18 +1653,39 @@ function renderEditor() {
   });
 
   app.querySelectorAll<HTMLInputElement>("input[type=range]").forEach((input) => {
-    const definition = sliderDefinitions.find((item) => item.key === input.dataset.key)!;
-    const update = () => {
-      const value = Number(input.value);
-      appearance[definition.key] = value;
-      app.querySelector<HTMLElement>(`[data-value="${definition.key}"]`)!.textContent = `${value} px`;
-      input.style.setProperty("--progress", `${(value - definition.min) / (definition.max - definition.min) * 100}%`);
-      previewAppearance();
-      scheduleAppearanceSave();
+    const { key, min, max } = sliderDefinitions.find((item) => item.key === input.dataset.key)!;
+    const number = app.querySelector<HTMLInputElement>(`#setting-${key}-value`)!;
+    const updateTrack = (value: number) => {
+      input.style.setProperty("--progress", `${(value - min) / (max - min) * 100}%`);
     };
-    input.style.setProperty("--progress", `${(Number(input.value) - definition.min) / (definition.max - definition.min) * 100}%`);
-    input.addEventListener("input", update);
+    const apply = (value: number) => {
+      if (appearance[key] === value) return;
+      appearance[key] = value;
+      input.valueAsNumber = value;
+      updateTrack(value);
+      previewAppearance();
+    };
+    updateTrack(appearance[key]);
+    input.addEventListener("input", () => {
+      const value = input.valueAsNumber;
+      number.valueAsNumber = value;
+      apply(value);
+      scheduleAppearanceSave();
+    });
     input.addEventListener("change", () => scheduleAppearanceSave(true));
+    number.addEventListener("input", () => {
+      const value = number.valueAsNumber;
+      if (!Number.isInteger(value) || value < min || value > max) return;
+      apply(value);
+      scheduleAppearanceSave();
+    });
+    number.addEventListener("change", () => {
+      const entered = number.valueAsNumber;
+      const value = Number.isFinite(entered) ? Math.min(max, Math.max(min, Math.round(entered))) : appearance[key];
+      number.valueAsNumber = value;
+      apply(value);
+      scheduleAppearanceSave(true);
+    });
   });
 
   const editForm = app.querySelector<HTMLFormElement>("#tile-edit-form");

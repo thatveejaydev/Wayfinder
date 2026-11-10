@@ -363,19 +363,20 @@ button { font: inherit; }
 }
 
 .remove-badge {
+  --remove-badge-size: max(17px, calc(22px * var(--content-scale, 1)));
   position: absolute;
   top: 0;
   right: calc(17px * var(--content-scale, 1));
-  width: max(13px, calc(19px * var(--content-scale, 1)));
-  height: max(13px, calc(19px * var(--content-scale, 1)));
+  width: var(--remove-badge-size);
+  height: var(--remove-badge-size);
   border-radius: 50%;
   display: grid;
   place-items: center;
   background: #dd6767;
   color: white;
-  font-size: max(11px, calc(16px * var(--content-scale, 1)));
-  line-height: 1;
 }
+
+.remove-badge svg { width: 60%; height: 60%; pointer-events: none; }
 
 .empty-prompt {
   position: absolute;
@@ -407,24 +408,28 @@ button { font: inherit; }
 .toast {
   position: absolute;
   left: 50%;
-  bottom: 55px;
-  max-width: 360px;
+  top: calc(50% + 100% * 231 / 620 + 14px);
+  width: max-content;
+  max-width: min(360px, calc(100vw - 24px));
   transform: translate(-50%, 10px);
   padding: 9px 13px;
-  border: 1px solid #5a768b;
+  border: 1px solid var(--palette-border, #3b3b3b);
   border-radius: 8px;
-  color: #eaf5ff;
-  background: #254159;
+  color: var(--palette-background-text, #f5f7f9);
+  background: var(--palette-background, #181818);
   box-shadow: 0 5px 20px rgba(0,0,0,.28);
   font-size: 12px;
   text-align: center;
+  overflow-wrap: anywhere;
   opacity: 0;
   pointer-events: none;
   transition: opacity 140ms ease, transform 140ms ease;
 }
 
+.palette-search.is-searching ~ .stage .toast { margin-top: 44px; }
+
 .toast.visible { opacity: 1; transform: translate(-50%, 0); }
-.toast.error { border-color: #a35c5c; background: #592b2b; }
+.toast.error { border-color: color-mix(in srgb, var(--palette-border, #3b3b3b), #dd6767 65%); }
 
 :root[data-theme="light"] {
   color-scheme: light;
@@ -651,6 +656,23 @@ body.editor-window :is(button, input, textarea, select):focus-visible {
 .tile-form > label:not(:first-child) { margin-top: 7px; }
 .tile-fields { display: grid; gap: 5px; margin-top: 7px; }
 .tile-fields:empty { display: none; }
+.tile-name-hint { margin-inline-start: 4px; color: var(--settings-muted); font-size: 11px; }
+
+.app-source-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-block: 3px;
+  color: var(--settings-muted);
+  font-size: 11px;
+}
+
+.app-source-divider::before, .app-source-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--settings-line);
+}
 
 .tile-form :is(input, textarea, select),
 .theme-panel select,
@@ -710,7 +732,27 @@ body.editor-window :is(button, input, textarea, select):focus-visible {
   white-space: nowrap;
 }
 
-.setting-range input {
+.setting-stepper {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.setting-stepper input {
+  width: 58px;
+  min-width: 0;
+  padding: 3px 4px;
+  border: 1px solid var(--settings-line);
+  border-radius: 5px;
+  color: var(--settings-text);
+  background: var(--settings-field);
+  font: inherit;
+  text-align: end;
+}
+
+.setting-stepper input::-webkit-inner-spin-button { opacity: 1; }
+
+.setting-range input[type="range"] {
   grid-column: 1 / -1;
   width: 100%;
   height: 19px;
@@ -748,7 +790,7 @@ body.editor-window :is(button, input, textarea, select):focus-visible {
   font-size: 13px;
 }
 
-.theme-panel select { width: 110px; }
+.theme-panel select { width: 150px; }
 .setting-color { display: flex; align-items: center; gap: 7px; }
 
 .setting-color input {
@@ -791,7 +833,14 @@ body.editor-window :is(button, input, textarea, select):focus-visible {
 .settings-status { color: var(--settings-accent); font-size: 12px; }
 .settings-status:not(:empty) { margin-top: 10px; }
 
-@media (max-width: 510px) {
+.about-details { margin: 0 0 16px; }
+.about-details dd { margin: 0; color: var(--settings-muted); }
+
+@media (max-width: 600px) {
+  .settings-tab { gap: 6px; padding-inline: 8px; }
+}
+
+@media (max-width: 550px) {
   .settings-tabs { gap: 2px; padding-inline: 8px; }
   .settings-tab { padding-inline: 7px; font-size: 12px; }
   .settings-tab .settings-icon { display: none; }

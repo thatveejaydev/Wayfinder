@@ -431,6 +431,9 @@ fn create_tile(
     if kind == "submenu" && depth >= MAX_RINGS - 1 {
         return Err("Submenus are limited to three rings".into());
     }
+    if kind == "folder" && name.trim().is_empty() {
+        return Err("Enter a name for the folder tile".into());
+    }
     let (path, text, name) = tile_fields(&kind, &name, &value)?;
     let item = Shortcut {
         id: next_shortcut_id()?,
@@ -462,16 +465,9 @@ fn tile_fields(
             if value.is_empty() || value.chars().count() > 20_000 {
                 return Err("Enter text up to 20,000 characters".into());
             }
-            (String::new(), Some(value.to_string()), "Text".to_string())
+            (String::new(), Some(value.to_string()), String::new())
         }
-        "webpage" => {
-            let path = normalized_webpage(value)?;
-            let host = Url::parse(&path)
-                .ok()
-                .and_then(|url| url.host_str().map(str::to_string))
-                .unwrap_or_else(|| "Webpage".to_string());
-            (path, None, host)
-        }
+        "webpage" => (normalized_webpage(value)?, None, String::new()),
         "app" => (validated_tile_path(value, false)?, None, String::new()),
         "folder" => {
             let path = validated_tile_path(value, true)?;
