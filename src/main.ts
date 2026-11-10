@@ -1176,6 +1176,7 @@ function ensureStageShell() {
           <path class="root-drop-indicator drop-indicator" />
         </svg>
         <div class="item-layer"></div>
+        <span class="workspace-badge" role="img" tabindex="-1" hidden></span>
         <div class="toast" role="status" aria-live="polite"></div>
       </div>
     </main>`;
@@ -1235,7 +1236,7 @@ function closeWorkspacePicker(restoreFocus = false) {
   const search = app.querySelector<HTMLInputElement>("#palette-search")!;
   search.parentElement!.hidden = editing;
   if (restoreFocus) {
-    const target = editing ? app.querySelector<HTMLButtonElement>(".edit-button") : search;
+    const target = editing ? app.querySelector<HTMLElement>(".workspace-badge") : search;
     target?.focus({ preventScroll: true });
   }
 }
@@ -1318,7 +1319,14 @@ function render(transition?: "opening" | "search") {
   childSegments.replaceChildren();
   layer.replaceChildren();
 
-  palette.querySelectorAll(".search-summary, .focus-controls, .edit-button, .empty-prompt").forEach((node) => node.remove());
+  const workspace = workspaceList.workspaces.find(({ id }) => id === workspaceList.activeId);
+  const badge = palette.querySelector<HTMLElement>(".workspace-badge")!;
+  badge.hidden = searching || Boolean(focused) || !workspace;
+  badge.textContent = workspace?.icon ?? "";
+  badge.title = workspace?.name ?? "";
+  badge.setAttribute("aria-label", workspace ? `Active workspace: ${workspace.name}` : "");
+
+  palette.querySelectorAll(".search-summary, .focus-controls, .empty-prompt").forEach((node) => node.remove());
   const centerTemplate = document.createElement("template");
   centerTemplate.innerHTML = `${searching ? `<div class="search-summary" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%" role="status">
     <span>${matches.length > MAX_ITEMS ? `${pageStart + 1}–${pageStart + roots.length} of ` : ""}${matches.length ? `${matches.length} ${matches.length === 1 ? "match" : "matches"}` : "No matches"}</span>
@@ -1326,11 +1334,7 @@ function render(transition?: "opening" | "search") {
   </div>` : focused ? `<div class="focus-controls" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%">
     <span class="focus-title"></span>
     <button class="focus-back" type="button">Back</button>
-  </div>` : `<button class="edit-button" type="button" aria-label="${editing ? "Finish editing" : "Edit shortcuts"}" title="${editing ? "Done editing" : "Edit shortcuts"}" aria-pressed="${editing}">
-    <svg viewBox="0 0 24 24" aria-hidden="true">${editing
-      ? '<path d="m9.2 16.3-4.5-4.5-1.7 1.7 6.2 6.2L21 7.9l-1.7-1.7z"/>'
-      : `<path d="M10 2h4l.5 3 1.5.9 2.8-1.1 2 3.4-2.3 1.9v1.8l2.3 1.9-2 3.4-2.8-1.1-1.5.9-.5 3h-4l-.5-3-1.5-.9-2.8 1.1-2-3.4 2.3-1.9v-1.8L3.2 8.2l2-3.4L8 5.9 9.5 5 10 2Zm2 6a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z" fill-rule="evenodd" transform="translate(0 1)"/>`}</svg>
-  </button>`}${!searching && !roots.length ? '<div class="empty-prompt"><span class="drop-arrow">↓</span><span>DRAG & DROP<br/>NEW ITEMS HERE</span></div>' : ""}`;
+  </div>` : ""}${!searching && !roots.length ? '<div class="empty-prompt"><span class="drop-arrow">↓</span><span>DRAG & DROP<br/>NEW ITEMS HERE</span></div>' : ""}`;
   palette.insertBefore(centerTemplate.content, toast);
 
   const searchField = app.querySelector<HTMLInputElement>("#palette-search")!;
@@ -1363,19 +1367,6 @@ function render(transition?: "opening" | "search") {
     title.title = title.textContent;
     app.querySelector<HTMLButtonElement>(".focus-back")!.addEventListener("click", () => backFromFocus("root"));
   }
-  app.querySelector<HTMLButtonElement>(".edit-button")?.addEventListener("click", async () => {
-    closeWorkspacePicker();
-    const nextEditing = !editing;
-    try {
-      await invoke("set_edit_window_visible", { visible: nextEditing });
-      editing = nextEditing;
-      if (editing) resetPaletteSearch();
-      if (!editing) resetEditSelection();
-      render();
-    } catch (error) {
-      showToast(String(error), true);
-    }
-  });
   if (previousAngles) {
     const from = roots.map((item, index): [number, number] => {
       const target = targetAngles[index];
@@ -2450,6 +2441,15 @@ async function start() {
     const refresh = () => void refreshWorkspacePalette().catch((error) => showToast(String(error), true));
     await listen("shortcuts-changed", refresh);
     await listen("workspaces-changed", refresh);
+    await listen("editor-opened", () => {
+      if (editing) return;
+      closeWorkspacePicker();
+      resetPaletteSearch();
+      focusedSubmenuId = null;
+      activeSubmenus = [];
+      editing = true;
+      if (app.querySelector(".stage")) render();
+    });
     await listen("editor-closed", () => {
       closeWorkspacePicker();
       if (editing) {
@@ -2506,7 +2506,7 @@ async function start() {
     app.addEventListener("pointerup", (event) => {
       if (editing || tileReorder || incomingTileKind || externalDragging || suppressTileClick) return;
       const target = event.target as Element;
-      if (!target.closest(".shortcut, .segment, .edit-button, .focus-controls, .palette-search, .search-summary, .ring-empty, .submenu-empty-slot, .empty-prompt, .workspace-picker")) {
+      if (!target.closest(".shortcut, .segment, .workspace-badge, .focus-controls, .palette-search, .search-summary, .ring-empty, .submenu-empty-slot, .empty-prompt, .workspace-picker")) {
         void invoke("dismiss_palette");
       }
     });

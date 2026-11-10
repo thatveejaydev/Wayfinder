@@ -145,7 +145,7 @@ button { font: inherit; }
   pointer-events: none;
 }
 
-.edit-button {
+.workspace-badge {
   position: absolute;
   left: 50%;
   top: 50%;
@@ -154,31 +154,14 @@ button { font: inherit; }
   transform: translate(-50%, -50%);
   display: grid;
   place-items: center;
-  border: 0;
-  color: var(--edit-button-color, #d6dbde);
-  background: transparent;
-  cursor: pointer;
-  opacity: .55;
-  transition: color 130ms ease, opacity 130ms ease, transform 130ms ease;
+  color: var(--palette-background-text);
+  font-family: "Segoe UI Emoji", sans-serif;
+  font-size: 26px;
+  line-height: 1;
+  user-select: none;
 }
 
-.edit-button:hover, .edit-button:focus-visible {
-  opacity: 1;
-  color: var(--palette-highlight, #5ba9f2);
-  transform: translate(-50%, -50%) scale(1.12);
-  outline: none;
-}
-
-.is-editing .edit-button {
-  opacity: 1;
-  color: var(--palette-highlight, #5ba9f2);
-}
-
-.edit-button svg {
-  width: 24px;
-  height: 24px;
-  fill: currentColor;
-}
+.workspace-badge[hidden] { display: none; }
 
 .focus-controls, .search-summary {
   position: absolute;
@@ -520,7 +503,6 @@ button { font: inherit; }
   --palette-selected: #b5d6f3;
   --palette-active-text: #17212b;
   --palette-hover-border: #4379a8;
-  --edit-button-color: #285e90;
 }
 
 :root[data-custom-highlight] {

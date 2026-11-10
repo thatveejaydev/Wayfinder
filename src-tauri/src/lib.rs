@@ -34,6 +34,8 @@ mod workspaces;
 use workspaces::WorkspaceStore;
 
 static OPEN_FILE_PICKERS: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_os = "windows")]
+static PALETTE_ORIGIN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static TAILWIND_COLORS: LazyLock<HashSet<String>> = LazyLock::new(|| {
     serde_json::from_str::<serde_json::Value>(include_str!("../../src/tailwind_colors.json"))
         .ok()
@@ -1041,15 +1043,18 @@ async fn open_shortcut(
             .map_err(|error| error.to_string()),
         "submenu" => Ok(()),
         #[cfg(target_os = "windows")]
-        "app" => tauri::async_runtime::spawn_blocking(move || {
-            app_launch::activate_or_launch(&item.path, || {
-                app.opener()
-                    .open_path(&item.path, None::<&str>)
-                    .map_err(|error| error.to_string())
+        "app" => {
+            let previous_foreground = PALETTE_ORIGIN.load(Ordering::Relaxed);
+            tauri::async_runtime::spawn_blocking(move || {
+                app_launch::toggle_or_launch(&item.path, previous_foreground, || {
+                    app.opener()
+                        .open_path(&item.path, None::<&str>)
+                        .map_err(|error| error.to_string())
+                })
             })
-        })
-        .await
-        .map_err(|error| error.to_string())?,
+            .await
+            .map_err(|error| error.to_string())?
+        }
         "folder" => {
             if !Path::new(&item.path).is_dir() {
                 return Err("The original folder no longer exists".into());
@@ -1091,10 +1096,22 @@ fn set_edit_window_visible(app: AppHandle, visible: bool) -> Result<(), String> 
         .get_webview_window("editor")
         .ok_or_else(|| "Edit window not found".to_string())?;
     if visible {
-        let _ = tauri::async_runtime::spawn_blocking(collect_installed_apps);
-        let _ = fit_editor_height(app.clone(), 0);
-        position_editor(&app);
-        editor.show().map_err(|e| e.to_string())?;
+        if !editor.is_visible().map_err(|e| e.to_string())? {
+            let _ = tauri::async_runtime::spawn_blocking(collect_installed_apps);
+            let _ = fit_editor_height(app.clone(), 0);
+            if app
+                .get_webview_window("main")
+                .is_some_and(|main| main.is_visible().unwrap_or(false))
+            {
+                position_editor(&app);
+            } else {
+                let _ = editor.center();
+            }
+            editor.show().map_err(|e| e.to_string())?;
+        }
+        if editor.is_minimized().map_err(|e| e.to_string())? {
+            editor.unminimize().map_err(|e| e.to_string())?;
+        }
         editor.set_focus().map_err(|e| e.to_string())?;
     } else {
         editor.hide().map_err(|e| e.to_string())?;
@@ -1346,6 +1363,14 @@ fn show_palette(app: &AppHandle) {
 fn present_palette(app: AppHandle) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("Palette window not found")?;
     if !window.is_visible().unwrap_or(false) {
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+            // The palette takes focus, so record which window it opened over.
+            let foreground = unsafe { GetForegroundWindow() };
+            PALETTE_ORIGIN.store(foreground.0 as isize, Ordering::Relaxed);
+        }
         let _ = position_palette(&window, cached_appearance(&app).open_at_screen_center);
         window.show().map_err(|error| error.to_string())?;
         mouse_hotkey::watch_outside_clicks(true);
@@ -1356,6 +1381,8 @@ fn present_palette(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn dismiss_palette(app: AppHandle) {
+    #[cfg(target_os = "windows")]
+    PALETTE_ORIGIN.store(0, Ordering::Relaxed);
     mouse_hotkey::watch_outside_clicks(false);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
@@ -1428,13 +1455,18 @@ pub fn run() {
             app.manage(init_palette_hotkey(app.handle()));
 
             let show = MenuItem::with_id(app, "show", "Show palette", true, None::<&str>)?;
+            let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &settings, &quit])?;
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     if event.id() == "show" {
                         show_palette(app);
+                    } else if event.id() == "settings" {
+                        if set_edit_window_visible(app.clone(), true).is_ok() {
+                            let _ = app.emit_to("main", "editor-opened", ());
+                        }
                     } else if event.id() == "quit" {
                         app.exit(0);
                     }

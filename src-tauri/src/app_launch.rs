@@ -29,10 +29,10 @@ use windows::{
         UI::{
             Shell::{IShellLinkW, ShellLink},
             WindowsAndMessaging::{
-                EnumWindows, GetLastActivePopup, GetWindow, GetWindowLongPtrW,
+                EnumWindows, GetAncestor, GetLastActivePopup, GetWindow, GetWindowLongPtrW,
                 GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
-                ShowWindowAsync, GWL_EXSTYLE, GW_OWNER, SW_RESTORE, WS_EX_APPWINDOW,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                ShowWindowAsync, GA_ROOTOWNER, GWL_EXSTYLE, GW_OWNER, SW_MINIMIZE, SW_RESTORE,
+                WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
             },
         },
     },
@@ -116,6 +116,30 @@ fn matching_processes(target: &Path) -> windows::core::Result<Vec<u32>> {
     }
 }
 
+fn is_app_window(window: HWND, pids: &[u32]) -> bool {
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+    if !pids.contains(&pid) || !unsafe { IsWindowVisible(window) }.as_bool() {
+        return false;
+    }
+    let style = unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32;
+    if style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE).0 != 0
+        || (style & WS_EX_APPWINDOW.0 == 0 && unsafe { GetWindow(window, GW_OWNER) }.is_ok())
+    {
+        return false;
+    }
+    let mut cloaked = 0u32;
+    let _ = unsafe {
+        DwmGetWindowAttribute(
+            window,
+            DWMWA_CLOAKED,
+            ptr::from_mut(&mut cloaked).cast(),
+            size_of::<u32>() as u32,
+        )
+    };
+    cloaked == 0
+}
+
 fn app_window(pids: &[u32]) -> windows::core::Result<Option<HWND>> {
     struct Search<'a> {
         pids: &'a [u32],
@@ -124,27 +148,7 @@ fn app_window(pids: &[u32]) -> windows::core::Result<Option<HWND>> {
     }
     unsafe extern "system" fn collect(window: HWND, data: LPARAM) -> BOOL {
         let search = unsafe { &mut *(data.0 as *mut Search<'_>) };
-        let mut pid = 0;
-        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
-        if !search.pids.contains(&pid) || !unsafe { IsWindowVisible(window) }.as_bool() {
-            return BOOL(1);
-        }
-        let style = unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32;
-        if style & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE).0 != 0
-            || (style & WS_EX_APPWINDOW.0 == 0 && unsafe { GetWindow(window, GW_OWNER) }.is_ok())
-        {
-            return BOOL(1);
-        }
-        let mut cloaked = 0u32;
-        let _ = unsafe {
-            DwmGetWindowAttribute(
-                window,
-                DWMWA_CLOAKED,
-                ptr::from_mut(&mut cloaked).cast(),
-                size_of::<u32>() as u32,
-            )
-        };
-        if cloaked == 0 {
+        if is_app_window(window, search.pids) {
             if unsafe { IsIconic(window) }.as_bool() {
                 search.minimized.get_or_insert(window);
             } else {
@@ -162,8 +166,9 @@ fn app_window(pids: &[u32]) -> windows::core::Result<Option<HWND>> {
     Ok(search.window.or(search.minimized))
 }
 
-pub(super) fn activate_or_launch(
+pub(super) fn toggle_or_launch(
     path: &str,
+    previous_foreground: isize,
     launch: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let _lock = APP_LAUNCH.lock().map_err(|error| error.to_string())?;
@@ -186,6 +191,19 @@ pub(super) fn activate_or_launch(
         .map_err(|error| format!("Could not check whether the app is running: {error}"))?;
     if pids.is_empty() {
         return launch();
+    }
+    let foreground = HWND(previous_foreground as *mut _);
+    let owner = unsafe { GetAncestor(foreground, GA_ROOTOWNER) };
+    // An owned dialog may have had focus when the palette opened.
+    if let Some(window) = [foreground, owner]
+        .into_iter()
+        .find(|&window| is_app_window(window, &pids) && !unsafe { IsIconic(window) }.as_bool())
+    {
+        return if unsafe { ShowWindowAsync(window, SW_MINIMIZE) }.as_bool() {
+            Ok(())
+        } else {
+            Err("Windows could not minimize the running app.".into())
+        };
     }
     let window = app_window(&pids)
         .map_err(|error| format!("Could not find the app window: {error}"))?
