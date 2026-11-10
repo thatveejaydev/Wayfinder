@@ -25,8 +25,8 @@ function searchText(value: string): SearchText {
   };
 }
 
-export function indexShortcut<T extends { id: string }>(item: T, name: string, parents: string[]) {
-  return { item, name: searchText(name), parents: parents.map(searchText) };
+export function indexShortcut<T extends { id: string }>(item: T, name: string, parents: string[], recentId = item.id) {
+  return { item, name: searchText(name), parents: parents.map(searchText), recentId };
 }
 
 type IndexedShortcut<T extends { id: string }> = ReturnType<typeof indexShortcut<T>>;
@@ -100,9 +100,9 @@ export function rankShortcutMatches<T extends { id: string }>(index: IndexedShor
   const query = searchText(value);
   if (!query.literal) return [];
   const recent = new Map(recentIds.map((id, position) => [id, position]));
-  const matches = index.flatMap(({ item, name, parents }) => {
+  const matches = index.flatMap(({ item, name, parents, recentId }) => {
     const rank = matchRank(name, parents, query);
-    return rank ? [{ item, rank, recent: recent.get(item.id) ?? recent.size }] : [];
+    return rank ? [{ item, rank, recent: recent.get(item.id) ?? recent.get(recentId) ?? recent.size }] : [];
   });
   matches.sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.recent - b.recent);
   return matches.map(({ item }) => item);

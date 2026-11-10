@@ -427,6 +427,17 @@ button { font: inherit; }
   -webkit-box-orient: vertical;
 }
 
+.shortcut-workspace {
+  max-width: 100%;
+  overflow: hidden;
+  color: inherit;
+  opacity: .8;
+  font-size: max(8px, calc(10px * var(--content-scale, 1)));
+  line-height: 1.2;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .remove-badge {
   --remove-badge-size: max(17px, calc(22px * var(--content-scale, 1)));
   position: absolute;

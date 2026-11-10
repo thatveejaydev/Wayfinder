@@ -1504,6 +1504,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             workspaces::get_workspaces,
             workspaces::get_workspace_palette,
+            workspaces::get_workspace_search,
+            workspaces::get_workspace_preview,
             workspaces::change_workspace,
             list_shortcuts,
             shortcut_icon,

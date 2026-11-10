@@ -12,7 +12,7 @@ struct WorkspaceInfo {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct Workspace {
+pub(crate) struct Workspace {
     #[serde(flatten)]
     info: WorkspaceInfo,
     shortcuts: Vec<Shortcut>,
@@ -253,6 +253,28 @@ pub(crate) fn get_workspace_palette(
         list: store.list(),
         shortcuts: store.shortcuts(&store.active_id)?.clone(),
     })
+}
+
+#[tauri::command]
+pub(crate) fn get_workspace_search(
+    state: State<'_, Mutex<WorkspaceStore>>,
+) -> Result<Vec<Workspace>, String> {
+    let store = state.lock().map_err(|error| error.to_string())?;
+    Ok(store.workspaces.clone())
+}
+
+#[tauri::command]
+pub(crate) fn get_workspace_preview(
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
+) -> Result<Vec<Shortcut>, String> {
+    let store = state.lock().map_err(|error| error.to_string())?;
+    Ok(store
+        .shortcuts(&workspace_id)?
+        .iter()
+        .filter(|shortcut| shortcut.parent_id.is_none())
+        .cloned()
+        .collect())
 }
 
 #[tauri::command]
