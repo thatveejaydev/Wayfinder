@@ -29,6 +29,9 @@ mod folder_launch;
 mod keyboard;
 mod mouse_hotkey;
 mod tile_icons;
+mod workspaces;
+
+use workspaces::WorkspaceStore;
 
 static OPEN_FILE_PICKERS: AtomicUsize = AtomicUsize::new(0);
 static TAILWIND_COLORS: LazyLock<HashSet<String>> = LazyLock::new(|| {
@@ -62,7 +65,7 @@ struct Shortcut {
 #[derive(Default)]
 struct DragSession {
     generation: u64,
-    kind: Option<String>,
+    tile: Option<(String, String)>,
 }
 
 #[derive(Clone, Serialize)]
@@ -335,28 +338,6 @@ fn preview_appearance(
         .map_err(|e| e.to_string())
 }
 
-fn store_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("shortcuts.json"))
-}
-
-fn load_shortcuts(app: &AppHandle) -> Vec<Shortcut> {
-    let Ok(path) = store_path(app) else {
-        return Vec::new();
-    };
-    let Ok(contents) = fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    serde_json::from_str(&contents).unwrap_or_default()
-}
-
-fn save_shortcuts(app: &AppHandle, shortcuts: &[Shortcut]) -> Result<(), String> {
-    let path = store_path(app)?;
-    let json = serde_json::to_vec_pretty(shortcuts).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
-}
-
 fn preview_for(path: &Path, metadata: &fs::Metadata) -> Option<String> {
     tile_icons::image_preview(path, metadata, MAX_PREVIEW_BYTES)
 }
@@ -473,7 +454,8 @@ fn validated_tile_path(raw: &str, folder: bool) -> Result<String, String> {
 #[tauri::command]
 fn create_tile(
     app: AppHandle,
-    state: State<'_, Mutex<Vec<Shortcut>>>,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
     kind: String,
     name: String,
     value: String,
@@ -481,9 +463,10 @@ fn create_tile(
     parent_id: Option<String>,
     color: Option<String>,
 ) -> Result<Shortcut, String> {
-    let mut shortcuts = state.lock().map_err(|e| e.to_string())?;
-    let depth = parent_depth(&shortcuts, parent_id.as_deref())?;
-    if sibling_count(&shortcuts, parent_id.as_deref()) >= MAX_SHORTCUTS {
+    let mut store = state.lock().map_err(|e| e.to_string())?;
+    let shortcuts = store.edit_shortcuts(&workspace_id)?;
+    let depth = parent_depth(shortcuts, parent_id.as_deref())?;
+    if sibling_count(shortcuts, parent_id.as_deref()) >= MAX_SHORTCUTS {
         return Err(format!("This ring is full ({MAX_SHORTCUTS} items)"));
     }
     if kind == "submenu" && depth >= MAX_RINGS - 1 {
@@ -508,10 +491,7 @@ fn create_tile(
     let mut updated = shortcuts.clone();
     let position = sibling_insert_position(&updated, parent_id.as_deref(), index);
     updated.insert(position, item.clone());
-    save_shortcuts(&app, &updated)?;
-    *shortcuts = updated;
-    app.emit_to("main", "shortcuts-changed", ())
-        .map_err(|e| e.to_string())?;
+    store.save_shortcuts(&app, &workspace_id, updated)?;
     Ok(item)
 }
 
@@ -648,25 +628,25 @@ fn edited_tile(
 #[tauri::command]
 fn update_tile(
     app: AppHandle,
-    state: State<'_, Mutex<Vec<Shortcut>>>,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
     id: String,
     kind: String,
     name: String,
     value: String,
     color: Option<String>,
 ) -> Result<Shortcut, String> {
-    let mut shortcuts = state.lock().map_err(|e| e.to_string())?;
+    let mut store = state.lock().map_err(|e| e.to_string())?;
+    let shortcuts = store.edit_shortcuts(&workspace_id)?;
     let position = shortcuts
         .iter()
         .position(|item| item.id == id)
         .ok_or_else(|| "Shortcut not found".to_string())?;
-    let mut item = edited_tile(&shortcuts, &shortcuts[position], &kind, &name, &value)?;
+    let mut item = edited_tile(shortcuts, &shortcuts[position], &kind, &name, &value)?;
     item.color = tile_color(color)?;
     let mut updated = shortcuts.clone();
     updated[position] = item.clone();
-    save_shortcuts(&app, &updated)?;
-    *shortcuts = updated;
-    let _ = app.emit_to("main", "shortcuts-changed", ());
+    store.save_shortcuts(&app, &workspace_id, updated)?;
     Ok(item)
 }
 
@@ -692,17 +672,18 @@ fn move_tile(shortcuts: &mut Vec<Shortcut>, id: &str, index: usize) -> Result<bo
 #[tauri::command]
 fn reorder_tile(
     app: AppHandle,
-    state: State<'_, Mutex<Vec<Shortcut>>>,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
     id: String,
     index: usize,
-) -> Result<Vec<Shortcut>, String> {
-    let mut shortcuts = state.lock().map_err(|e| e.to_string())?;
+) -> Result<(), String> {
+    let mut store = state.lock().map_err(|e| e.to_string())?;
+    let shortcuts = store.edit_shortcuts(&workspace_id)?;
     let mut updated = shortcuts.clone();
     if move_tile(&mut updated, &id, index)? {
-        save_shortcuts(&app, &updated)?;
-        *shortcuts = updated;
+        store.save_shortcuts(&app, &workspace_id, updated)?;
     }
-    Ok(shortcuts.clone())
+    Ok(())
 }
 
 #[tauri::command]
@@ -830,6 +811,7 @@ fn begin_tile_drag(
     app: AppHandle,
     state: State<'_, Mutex<DragSession>>,
     kind: String,
+    workspace_id: String,
 ) -> Result<(), String> {
     if !matches!(
         kind.as_str(),
@@ -840,10 +822,10 @@ fn begin_tile_drag(
     let generation = {
         let mut session = state.lock().map_err(|e| e.to_string())?;
         session.generation = session.generation.wrapping_add(1);
-        session.kind = Some(kind.clone());
+        session.tile = Some((kind.clone(), workspace_id.clone()));
         session.generation
     };
-    app.emit_to("main", "tile-drag-start", kind)
+    app.emit_to("main", "tile-drag-start", (kind, workspace_id))
         .map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
     std::thread::spawn(move || {
@@ -852,7 +834,7 @@ fn begin_tile_drag(
             let active = app
                 .state::<Mutex<DragSession>>()
                 .lock()
-                .map(|session| session.generation == generation && session.kind.is_some())
+                .map(|session| session.generation == generation && session.tile.is_some())
                 .unwrap_or(false);
             if !active {
                 break;
@@ -870,10 +852,10 @@ fn begin_tile_drag(
 
 #[tauri::command]
 fn end_tile_drag(app: AppHandle, state: State<'_, Mutex<DragSession>>) -> Result<(), String> {
-    let kind = state.lock().map_err(|e| e.to_string())?.kind.take();
+    let tile = state.lock().map_err(|e| e.to_string())?.tile.take();
     #[cfg(target_os = "windows")]
-    if let (Some(kind), Some((x, y))) = (kind, cursor_in_palette(&app)) {
-        app.emit_to("main", "tile-drag-finished", (kind, x, y))
+    if let (Some((kind, workspace_id)), Some((x, y))) = (tile, cursor_in_palette(&app)) {
+        app.emit_to("main", "tile-drag-finished", (kind, workspace_id, x, y))
             .map_err(|e| e.to_string())?;
     }
     app.emit_to("main", "tile-drag-end", ())
@@ -883,11 +865,12 @@ fn end_tile_drag(app: AppHandle, state: State<'_, Mutex<DragSession>>) -> Result
 #[tauri::command]
 fn open_tile_form(
     app: AppHandle,
+    workspace_id: String,
     kind: String,
     index: usize,
     parent_id: Option<String>,
 ) -> Result<(), String> {
-    app.emit_to("editor", "tile-form-requested", (kind, index, parent_id))
+    app.emit_to("editor", "tile-form-requested", (kind, index, parent_id, workspace_id))
         .map_err(|e| e.to_string())?;
     if let Some(editor) = app.get_webview_window("editor") {
         let _ = editor.set_focus();
@@ -896,18 +879,23 @@ fn open_tile_form(
 }
 
 #[tauri::command]
-fn list_shortcuts(state: State<'_, Mutex<Vec<Shortcut>>>) -> Result<Vec<Shortcut>, String> {
-    Ok(state.lock().map_err(|e| e.to_string())?.clone())
+fn list_shortcuts(
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
+) -> Result<Vec<Shortcut>, String> {
+    let store = state.lock().map_err(|e| e.to_string())?;
+    Ok(store.edit_shortcuts(&workspace_id)?.clone())
 }
 
 #[tauri::command]
 async fn shortcut_icon(
     id: String,
-    state: State<'_, Mutex<Vec<Shortcut>>>,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
 ) -> Result<Option<String>, String> {
     let (kind, path) = {
-        let shortcuts = state.lock().map_err(|error| error.to_string())?;
-        let Some(item) = shortcuts.iter().find(|item| item.id == id) else {
+        let store = state.lock().map_err(|error| error.to_string())?;
+        let Some(item) = store.shortcuts(&workspace_id)?.iter().find(|item| item.id == id) else {
             return Ok(None);
         };
         (item.kind.clone(), item.path.clone())
@@ -926,13 +914,15 @@ async fn shortcut_icon(
 #[tauri::command]
 fn add_paths(
     app: AppHandle,
-    state: State<'_, Mutex<Vec<Shortcut>>>,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
     paths: Vec<String>,
     parent_id: Option<String>,
     index: Option<usize>,
 ) -> Result<Vec<Shortcut>, String> {
-    let mut shortcuts = state.lock().map_err(|e| e.to_string())?;
-    parent_depth(&shortcuts, parent_id.as_deref())?;
+    let mut store = state.lock().map_err(|e| e.to_string())?;
+    let shortcuts = store.edit_shortcuts(&workspace_id)?;
+    parent_depth(shortcuts, parent_id.as_deref())?;
     let mut updated = shortcuts.clone();
     let mut added = Vec::new();
     for (path_index, raw) in paths.into_iter().enumerate() {
@@ -989,8 +979,7 @@ fn add_paths(
         added.push(item);
     }
     if !added.is_empty() {
-        save_shortcuts(&app, &updated)?;
-        *shortcuts = updated;
+        store.save_shortcuts(&app, &workspace_id, updated)?;
     }
     Ok(added)
 }
@@ -998,10 +987,12 @@ fn add_paths(
 #[tauri::command]
 fn remove_shortcut(
     app: AppHandle,
-    state: State<'_, Mutex<Vec<Shortcut>>>,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
     id: String,
 ) -> Result<(), String> {
-    let mut shortcuts = state.lock().map_err(|e| e.to_string())?;
+    let mut store = state.lock().map_err(|e| e.to_string())?;
+    let shortcuts = store.edit_shortcuts(&workspace_id)?;
     let mut updated = shortcuts.clone();
     let mut removed = HashSet::from([id]);
     loop {
@@ -1020,21 +1011,22 @@ fn remove_shortcut(
         }
     }
     updated.retain(|item| !removed.contains(&item.id));
-    save_shortcuts(&app, &updated)?;
-    *shortcuts = updated;
+    store.save_shortcuts(&app, &workspace_id, updated)?;
     Ok(())
 }
 
 #[tauri::command]
 async fn open_shortcut(
     app: AppHandle,
-    state: State<'_, Mutex<Vec<Shortcut>>>,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
     id: String,
     in_terminal: Option<bool>,
 ) -> Result<(), String> {
     let item = state
         .lock()
         .map_err(|e| e.to_string())?
+        .shortcuts(&workspace_id)?
         .iter()
         .find(|item| item.id == id)
         .cloned()
@@ -1425,9 +1417,9 @@ pub fn run() {
             tile_icons::init(app_data_dir.join("icon-cache"));
             #[cfg(all(debug_assertions, target_os = "windows"))]
             watch_dev_supervisor(app.handle().clone());
-            let shortcuts = load_shortcuts(app.handle());
+            let workspaces = WorkspaceStore::load(&app_data_dir)?;
             let appearance = load_appearance(app.handle());
-            app.manage(Mutex::new(shortcuts));
+            app.manage(Mutex::new(workspaces));
             app.manage(Mutex::new(appearance));
             app.manage(Mutex::new(DragSession::default()));
             app.handle()
@@ -1478,6 +1470,9 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            workspaces::get_workspaces,
+            workspaces::get_workspace_palette,
+            workspaces::change_workspace,
             list_shortcuts,
             shortcut_icon,
             add_paths,

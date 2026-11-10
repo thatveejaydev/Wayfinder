@@ -226,6 +226,64 @@ button { font: inherit; }
 }
 
 .palette-search[hidden] { display: none; }
+.workspace-picker {
+  position: absolute;
+  z-index: 3;
+  top: calc(50% + min(var(--tile-size, 620px), 100vh) * 231 / 620 + 14px);
+  left: 50%;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 24px));
+  transform: translateX(-50%);
+  color: var(--palette-background-text, #fff);
+  text-align: center;
+}
+
+.workspace-picker[hidden] { display: none; }
+
+.workspace-track {
+  display: flex;
+  gap: 5px;
+  padding: 5px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  border: 1px solid var(--palette-border);
+  border-radius: 24px;
+  background: var(--palette-background);
+}
+
+.workspace-choice {
+  display: grid;
+  flex: 0 0 38px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 15px;
+  background: transparent;
+  font-size: 19px;
+  cursor: pointer;
+}
+
+.workspace-choice:hover { background: color-mix(in srgb, var(--palette-highlight) 16%, transparent); }
+.workspace-choice.is-highlighted {
+  border-color: var(--palette-highlight);
+  background: color-mix(in srgb, var(--palette-highlight) 24%, var(--palette-background));
+  outline: none;
+}
+
+.workspace-caption {
+  display: inline-block;
+  max-width: 100%;
+  margin-top: 4px;
+  padding: 2px 8px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--palette-background);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .palette-search:not(.is-searching) { opacity: 0; pointer-events: none; }
 .palette-search:focus-within { border-color: color-mix(in srgb, var(--palette-border), currentColor 35%); }
 .palette-search svg { width: 16px; height: 16px; flex: none; }
@@ -634,6 +692,31 @@ body.editor-window :is(button, input, textarea, select, summary):focus-visible {
 .tile-source-copy strong { display: block; font-size: 13px; font-weight: 600; }
 .tile-source-copy small { display: block; color: var(--settings-muted); font-size: 11px; }
 .tile-source-grip { display: flex; color: var(--settings-muted); }
+
+.workspace-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px;
+  border: 1px solid var(--settings-line);
+  border-radius: 8px;
+}
+
+.workspace-row-icon { flex: none; width: 23px; text-align: center; }
+.workspace-row-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.workspace-active { padding-inline: 5px; color: var(--settings-accent); font-size: 11px; }
+.workspace-row .tile-browse { padding: 4px 6px; }
+.workspace-row button:disabled { opacity: .45; cursor: default; }
+#workspace-form, .workspace-delete { margin-top: 12px; }
+.workspace-delete p { margin: 0 0 6px; font-size: 13px; }
 
 .tile-selection-summary {
   display: flex;

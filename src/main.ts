@@ -42,8 +42,16 @@ const tileNameHints: Partial<Record<EditableTileKind, string>> = {
   text: "(Optional · defaults to the first 12 characters)",
   webpage: "(Leave blank for icon only)",
 };
-type TileSelection = { item: Omit<Shortcut, "preview">; level: number };
-type EditorTab = "tiles" | "edit-tile" | "appearance" | "theme" | "misc" | "about";
+type TileSelection = { item: Omit<Shortcut, "preview">; level: number; workspaceId: string };
+type EditorTab = "tiles" | "edit-tile" | "workspace" | "appearance" | "theme" | "misc" | "about";
+type Workspace = { id: string; name: string; icon: string };
+type WorkspaceList = { revision: number; activeId: string; workspaces: Workspace[] };
+type WorkspacePalette = WorkspaceList & { shortcuts: Shortcut[] };
+type WorkspaceChange =
+  | { type: "create"; name: string; icon: string }
+  | ({ type: "update" } & Workspace)
+  | { type: "move"; id: string; index: number }
+  | { type: "activate" | "delete"; id: string };
 type InstalledApp = { name: string; path: string };
 const tileDefinitions: { kind: TileKind; label: string; detail: string }[] = [
   { kind: "submenu", label: "Submenu", detail: "Group related shortcuts in a focused view" },
@@ -116,13 +124,20 @@ const RECENT_SHORTCUTS_KEY = "wayfinder.recent-shortcuts";
 const MAX_RECENT_SHORTCUTS = 100;
 
 let shortcuts: Shortcut[] = [];
+let workspaceList: WorkspaceList = { revision: -1, activeId: "", workspaces: [] };
+let workspaceHighlight: string | null = null;
+let workspaceDraft: { id?: string; name: string; icon: string } | null = null;
+let workspaceDeleteId: string | null = null;
+let workspaceChanging = false;
 let searchIndex: { source: Shortcut[]; entries: ReturnType<typeof indexShortcut<Shortcut>>[] } | undefined;
 let recentShortcutIds = isEditorWindow ? [] : loadRecentShortcutIds();
 const shortcutIcons = new Map<string, Promise<string | null>>();
 let editing = false;
 let dragging = false;
 let externalDragging = false;
+let externalDragWorkspaceId: string | null = null;
 let incomingTileKind: TileKind | null = null;
+let incomingTileWorkspaceId: string | null = null;
 let incomingIndex: number | null = null;
 let incomingParentId: string | null = null;
 let activeSubmenus: string[] = [];
@@ -141,7 +156,7 @@ let saveQueue = Promise.resolve();
 let editorTab: EditorTab = "tiles";
 let paletteHotkey: string | null = null;
 let savingHotkey = false;
-let tileForm: { kind: TileKind; index: number; parentId: string | null } | null = null;
+let tileForm: { kind: TileKind; index: number; parentId: string | null; workspaceId: string } | null = null;
 let selectedTileId: string | null = null;
 let selectedTile: TileSelection | null = null;
 let tileReorder: TileReorder | null = null;
@@ -264,7 +279,7 @@ function positionSegment(segment: SVGGElement, start: number, end: number, inner
 function loadShortcutIcon(item: Shortcut, container: HTMLElement) {
   let source = shortcutIcons.get(item.id);
   if (!source) {
-    source = invoke<string | null>("shortcut_icon", { id: item.id }).catch(() => null);
+    source = invoke<string | null>("shortcut_icon", { id: item.id, workspaceId: workspaceList.activeId }).catch(() => null);
     shortcutIcons.set(item.id, source);
   }
   void source.then((url) => {
@@ -506,7 +521,7 @@ function openSubmenu(item: Shortcut, level: number) {
 }
 
 function hoverTile(item: Shortcut, level: number) {
-  if (tileReorder || searchQuery.trim()) return;
+  if (workspaceHighlight || tileReorder || searchQuery.trim()) return;
   if (item.kind === "submenu") {
     openSubmenu(item, level);
   } else if ((!editing || !selectedTileId) && level < activeSubmenus.length) {
@@ -875,7 +890,8 @@ async function finishTileReorder(event: PointerEvent) {
   if (app.hasPointerCapture(event.pointerId)) app.releasePointerCapture(event.pointerId);
   busy = true;
   try {
-    shortcuts = await invoke<Shortcut[]>("reorder_tile", { id: drag.id, index });
+    await invoke("reorder_tile", { id: drag.id, index, workspaceId: workspaceList.activeId });
+    await refreshWorkspacePalette();
     render();
   } catch (error) {
     cancelTileReorder();
@@ -885,8 +901,8 @@ async function finishTileReorder(event: PointerEvent) {
   }
 }
 
-async function finishTileDrop(kind: TileKind, target: DropTarget) {
-  if (tileDropHandled) return;
+async function finishTileDrop(kind: TileKind, target: DropTarget, workspaceId: string | null) {
+  if (tileDropHandled || workspaceId !== workspaceList.activeId) return;
   tileDropHandled = true;
   incomingTileKind = null;
   incomingIndex = null;
@@ -898,7 +914,7 @@ async function finishTileDrop(kind: TileKind, target: DropTarget) {
     return;
   }
   try {
-    await invoke("open_tile_form", { kind, index: target.index, parentId: target.parentId });
+    await invoke("open_tile_form", { kind, index: target.index, parentId: target.parentId, workspaceId });
   } catch (error) {
     showToast(String(error), true);
   }
@@ -1151,6 +1167,7 @@ function ensureStageShell() {
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
       <input id="palette-search" type="text" aria-label="Search shortcuts" placeholder="Search shortcuts" autocomplete="off" spellcheck="false" />
     </label>
+    <div class="workspace-picker" role="group" aria-label="Switch workspace" hidden></div>
     <main class="stage">
       <div class="palette" aria-label="Wayfinder shortcut palette">
         <svg class="ring-svg" viewBox="0 0 620 620" aria-hidden="true">
@@ -1166,6 +1183,75 @@ function ensureStageShell() {
     stage = app.querySelector<HTMLElement>(".stage")!;
   }
   return stage;
+}
+
+function focusWorkspaceChoice() {
+  const choice = app.querySelector<HTMLButtonElement>(".workspace-choice.is-highlighted");
+  choice?.focus({ preventScroll: true });
+  choice?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+function renderWorkspacePicker() {
+  const picker = app.querySelector<HTMLElement>(".workspace-picker")!;
+  const hadFocus = picker.contains(document.activeElement);
+  picker.hidden = workspaceHighlight === null;
+  if (picker.hidden) {
+    picker.replaceChildren();
+    return;
+  }
+  const track = document.createElement("div");
+  track.className = "workspace-track";
+  const caption = document.createElement("div");
+  caption.className = "workspace-caption";
+  caption.setAttribute("aria-hidden", "true");
+  const highlightedName = workspaceList.workspaces.find(({ id }) => id === workspaceHighlight)?.name ?? "";
+  caption.textContent = highlightedName;
+  track.append(...workspaceList.workspaces.map((workspace) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "workspace-choice";
+    button.classList.toggle("is-highlighted", workspace.id === workspaceHighlight);
+    button.tabIndex = -1;
+    button.title = workspace.name;
+    button.setAttribute("aria-label", workspace.name);
+    if (workspace.id === workspaceList.activeId) button.setAttribute("aria-current", "true");
+    const icon = document.createElement("span");
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = workspace.icon;
+    button.append(icon);
+    button.addEventListener("pointerenter", () => { caption.textContent = workspace.name; });
+    button.addEventListener("pointerleave", () => { caption.textContent = highlightedName; });
+    button.addEventListener("click", () => void switchWorkspace(workspace.id));
+    return button;
+  }));
+  picker.replaceChildren(track, caption);
+  if (hadFocus) focusWorkspaceChoice();
+}
+
+function closeWorkspacePicker(restoreFocus = false) {
+  if (workspaceHighlight === null) return;
+  workspaceHighlight = null;
+  renderWorkspacePicker();
+  const search = app.querySelector<HTMLInputElement>("#palette-search")!;
+  search.parentElement!.hidden = editing;
+  if (restoreFocus) {
+    const target = editing ? app.querySelector<HTMLButtonElement>(".edit-button") : search;
+    target?.focus({ preventScroll: true });
+  }
+}
+
+async function switchWorkspace(id: string) {
+  if (busy || workspaceChanging || incomingTileKind || tileReorder) return;
+  workspaceChanging = true;
+  try {
+    await invoke("change_workspace", { change: { type: "activate", id } });
+    await refreshWorkspacePalette();
+    closeWorkspacePicker(true);
+  } catch (error) {
+    showToast(String(error), true);
+  } finally {
+    workspaceChanging = false;
+  }
 }
 
 function render(transition?: "opening" | "search") {
@@ -1249,7 +1335,7 @@ function render(transition?: "opening" | "search") {
 
   const searchField = app.querySelector<HTMLInputElement>("#palette-search")!;
   const search = searchField.parentElement!;
-  search.hidden = editing;
+  search.hidden = editing || workspaceHighlight !== null;
   search.classList.toggle("is-searching", searching);
   searchField.tabIndex = searching ? 0 : -1;
   if (searchField.value !== searchQuery) searchField.value = searchQuery;
@@ -1278,6 +1364,7 @@ function render(transition?: "opening" | "search") {
     app.querySelector<HTMLButtonElement>(".focus-back")!.addEventListener("click", () => backFromFocus("root"));
   }
   app.querySelector<HTMLButtonElement>(".edit-button")?.addEventListener("click", async () => {
+    closeWorkspacePicker();
     const nextEditing = !editing;
     try {
       await invoke("set_edit_window_visible", { visible: nextEditing });
@@ -1304,22 +1391,16 @@ function render(transition?: "opening" | "search") {
   }
   updateChildDropIndicator(1, false);
   updateChildDropIndicator(2, false);
+  renderWorkspacePicker();
 }
 
 async function removeItem(item: Shortcut) {
   if (busy) return;
   busy = true;
   try {
-    await invoke("remove_shortcut", { id: item.id });
-    shortcuts = await invoke<Shortcut[]>("list_shortcuts");
-    const remainingIds = new Set(shortcuts.map((shortcut) => shortcut.id));
-    for (const id of shortcutIcons.keys()) {
-      if (!remainingIds.has(id)) shortcutIcons.delete(id);
-    }
-    pruneTilePool(remainingIds);
-    if (selectedTileId && !remainingIds.has(selectedTileId)) resetEditSelection();
-    else activeSubmenus = activeSubmenus.filter((id) => remainingIds.has(id));
-    render();
+    const workspaceId = workspaceList.activeId;
+    await invoke("remove_shortcut", { id: item.id, workspaceId });
+    await refreshWorkspacePalette();
     showToast(`Removed ${shortcutName(item)}`);
   } catch (error) {
     showToast(String(error), true);
@@ -1347,13 +1428,14 @@ function backFromFocus(destination: "parent" | "root") {
 }
 
 async function activate(item: Shortcut, level: number, shiftKey: boolean) {
-  if (busy) return;
+  if (busy || workspaceChanging) return;
+  const workspaceId = workspaceList.activeId;
   if (editing) {
     selectedTileId = item.id;
     if (item.kind !== "submenu") activeSubmenus = activeSubmenus.slice(0, level);
     if (!openSubmenu(item, level)) render();
     const { id, name, kind, path, text, color, emoji } = item;
-    await emitTo("editor", "tile-selection-changed", { item: { id, name, kind, path, text, color, emoji }, level })
+    await emitTo("editor", "tile-selection-changed", { item: { id, name, kind, path, text, color, emoji }, level, workspaceId })
       .catch((error) => showToast(String(error), true));
     return;
   }
@@ -1368,7 +1450,7 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean) {
   }
   busy = true;
   try {
-    const openShortcut = () => invoke("open_shortcut", { id: item.id, inTerminal: item.kind === "folder" && shiftKey });
+    const openShortcut = () => invoke("open_shortcut", { id: item.id, workspaceId, inTerminal: item.kind === "folder" && shiftKey });
     // Windows lets the foreground palette hand focus to an existing app window.
     if (item.kind === "app") await openShortcut();
     await invoke("dismiss_palette");
@@ -1388,14 +1470,14 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean) {
   }
 }
 
-async function addDroppedPaths(paths: string[], target: DropTarget | null) {
-  if (busy || !paths.length) return;
+async function addDroppedPaths(paths: string[], target: DropTarget | null, workspaceId: string | null) {
+  if (busy || !paths.length || workspaceId !== workspaceList.activeId) return;
   busy = true;
   dragging = false;
   const parentId = target?.parentId ?? focusedSubmenuId;
   try {
-    const added = await invoke<Shortcut[]>("add_paths", { paths, parentId, index: target?.index });
-    shortcuts = await invoke<Shortcut[]>("list_shortcuts");
+    const added = await invoke<Shortcut[]>("add_paths", { paths, parentId, index: target?.index, workspaceId });
+    await refreshWorkspacePalette();
     render();
     if (added.length) {
       showToast(`${added.length} shortcut${added.length === 1 ? "" : "s"} added`);
@@ -1408,6 +1490,23 @@ async function addDroppedPaths(paths: string[], target: DropTarget | null) {
   } finally {
     busy = false;
   }
+}
+
+function bindEmojiField(field: HTMLInputElement, picker: HTMLButtonElement, error: HTMLElement) {
+  const graphemes = new Intl.Segmenter();
+  field.addEventListener("input", () => {
+    const emoji = field.value.trim();
+    const valid = !emoji || (Array.from(graphemes.segment(emoji)).length === 1 && /[\p{Extended_Pictographic}\p{Emoji_Presentation}\u20e3]/u.test(emoji));
+    field.setCustomValidity(valid ? "" : "Choose one emoji for the icon.");
+  });
+  picker.addEventListener("click", () => {
+    error.textContent = "";
+    field.focus();
+    field.select();
+    void invoke("open_emoji_picker").catch((failure) => {
+      if (field.isConnected) error.textContent = String(failure);
+    });
+  });
 }
 
 function tileValueFields(kind: EditableTileKind, id: string) {
@@ -1469,21 +1568,8 @@ function bindTileValueFields(form: HTMLFormElement, fields: HTMLElement, kind: E
     });
   }
   if (kind === "submenu" && value instanceof HTMLInputElement) {
-    const graphemes = new Intl.Segmenter();
-    value.addEventListener("input", () => {
-      const emoji = value.value.trim();
-      const valid = !emoji || (Array.from(graphemes.segment(emoji)).length === 1 && /[\p{Extended_Pictographic}\p{Emoji_Presentation}\u20e3]/u.test(emoji));
-      value.setCustomValidity(valid ? "" : "Choose one emoji for the submenu icon.");
-    });
-    fields.querySelector<HTMLButtonElement>(".tile-emoji-picker")!.addEventListener("click", () => {
-      const error = form.querySelector<HTMLElement>(".tile-form-error")!;
-      error.textContent = "";
-      value.focus();
-      value.select();
-      void invoke("open_emoji_picker").catch((failure) => {
-        if (value.isConnected) error.textContent = String(failure);
-      });
-    });
+    bindEmojiField(value, fields.querySelector<HTMLButtonElement>(".tile-emoji-picker")!,
+      form.querySelector<HTMLElement>(".tile-form-error")!);
     return value;
   }
   fields.querySelector<HTMLButtonElement>(".tile-browse")?.addEventListener("click", async () => {
@@ -1588,6 +1674,7 @@ const settingsIconPaths = {
   about: "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0zM12 11v5m0-8h.01",
   tiles: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z",
   "edit-tile": "m13.5 6.5 4 4M4 20l4.5-1 11-11a2.8 2.8 0 0 0-4-4l-11 11L4 20z",
+  workspace: "M3 7h18v13H3zM8 7V4h8v3M3 12h18m-11 0v2h4v-2",
   appearance: "M3 6h5m4 0h9M3 12h9m4 0h5M3 18h3m4 0h11M8 4v4m8 2v4M6 16v4",
   theme: "M12 3a9 9 0 1 0 0 18h1.5a1.5 1.5 0 0 0 1.1-2.5 1.5 1.5 0 0 1 1.1-2.5H18a3 3 0 0 0 3-3c0-5.5-4-10-9-10zM7.5 12h.01m2-4h.01m4-.5h.01m3.5 3h.01",
   misc: "M9 7v10a2 2 0 1 1-2-2h10a2 2 0 1 1-2 2V7a2 2 0 1 1 2 2H7a2 2 0 1 1 2-2z",
@@ -1669,7 +1756,7 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const details = { id: item.id, kind, name: name.value, value: value?.value ?? "", color: selectedColor() };
+    const details = { id: item.id, workspaceId: selection.workspaceId, kind, name: name.value, value: value?.value ?? "", color: selectedColor() };
     const controls = form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>(":is(input, textarea, select, button):enabled");
     controls.forEach((control) => { control.disabled = true; });
     error.textContent = "";
@@ -1729,10 +1816,157 @@ function observeEditorHeight() {
   }
 }
 
+function workspaceSettings() {
+  return `
+    ${settingsHeading("Workspace", "Keep a separate shortcut palette for each area of work. Press Tab in the palette to switch.")}
+    <ul class="workspace-list" aria-label="Workspaces">
+      ${workspaceList.workspaces.map(({ id }, index) => `
+        <li class="workspace-row">
+          <span class="workspace-row-icon" aria-hidden="true"></span>
+          <span class="workspace-row-name"></span>
+          ${id === workspaceList.activeId ? '<span class="workspace-active">Active</span>' :
+            '<button type="button" class="tile-browse" data-action="activate">Switch</button>'}
+          <button type="button" class="tile-browse" data-action="edit">Edit</button>
+          <button type="button" class="tile-browse" data-action="up" ${index === 0 ? "disabled" : ""}>↑</button>
+          <button type="button" class="tile-browse" data-action="down" ${index === workspaceList.workspaces.length - 1 ? "disabled" : ""}>↓</button>
+          <button type="button" class="tile-browse" data-action="delete" ${workspaceList.workspaces.length === 1 ? "disabled" : ""}>Delete</button>
+        </li>
+      `).join("")}
+    </ul>
+    <button type="button" id="workspace-add" class="tile-save">New workspace</button>
+    ${workspaceDraft ? `
+      <form id="workspace-form" class="tile-form tile-edit-form">
+        <label for="workspace-name">Name</label>
+        <input id="workspace-name" required maxlength="80" autocomplete="off" />
+        <label for="workspace-icon">Emoji icon <small class="tile-name-hint">(Optional)</small></label>
+        <div class="tile-path-row">
+          <input id="workspace-icon" class="tile-emoji-input" type="text" autocomplete="off" spellcheck="false" />
+          <button type="button" class="tile-browse workspace-emoji-picker">Pick emoji</button>
+        </div>
+        <div class="tile-form-error" role="alert"></div>
+        <div class="tile-form-actions">
+          <button type="button" class="tile-cancel">Cancel</button>
+          <button type="submit" class="tile-save">${workspaceDraft.id ? "Save workspace" : "Create workspace"}</button>
+        </div>
+      </form>
+    ` : ""}
+    ${workspaceDeleteId ? `
+      <div class="workspace-delete" role="group" aria-label="Confirm workspace deletion">
+        <p class="workspace-delete-message"></p>
+        <div class="tile-form-actions">
+          <button type="button" class="tile-cancel">Cancel</button>
+          <button type="button" class="tile-save workspace-delete-confirm">Delete workspace</button>
+        </div>
+      </div>
+    ` : ""}
+  `;
+}
+
+function applyEditorWorkspaces(next: WorkspaceList) {
+  if (next.revision <= workspaceList.revision) return;
+  workspaceList = next;
+  const staleForm = tileForm !== null && tileForm.workspaceId !== next.activeId;
+  const staleSelection = selectedTile !== null && selectedTile.workspaceId !== next.activeId;
+  if (staleForm) tileForm = null;
+  if (staleSelection) selectedTile = null;
+  if (workspaceDraft?.id && !next.workspaces.some(({ id }) => id === workspaceDraft?.id)) workspaceDraft = null;
+  if (workspaceDeleteId && !next.workspaces.some(({ id }) => id === workspaceDeleteId)) workspaceDeleteId = null;
+  if (editorTab === "workspace" || staleForm || staleSelection) renderEditor();
+}
+
+function bindWorkspaceSettings(panel: HTMLElement) {
+  const status = () => app.querySelector<HTMLElement>(".settings-status")!;
+  const add = panel.querySelector<HTMLButtonElement>("#workspace-add")!;
+  const report = async (change: WorkspaceChange, message: string) => {
+    if (workspaceChanging) return;
+    workspaceChanging = true;
+    try {
+      const next = await invoke<WorkspaceList>("change_workspace", { change });
+      if (change.type === "create" || change.type === "update") workspaceDraft = null;
+      if (change.type === "delete") workspaceDeleteId = null;
+      applyEditorWorkspaces(next);
+      if (editorTab === "workspace") {
+        renderEditor();
+        const row = Array.from(app.querySelectorAll<HTMLElement>(".workspace-row"))
+          .find((item) => item.dataset.workspaceId === ("id" in change ? change.id : workspaceList.activeId));
+        const action = change.type === "move" ? "up" : "edit";
+        const focus = row?.querySelector<HTMLButtonElement>(`[data-action="${action}"]:enabled`)
+          ?? row?.querySelector<HTMLButtonElement>('[data-action="edit"]')
+          ?? app.querySelector<HTMLButtonElement>("#workspace-add");
+        focus?.focus();
+      }
+      status().textContent = message;
+    } catch (error) {
+      const formError = app.querySelector<HTMLElement>("#workspace-form .tile-form-error");
+      (formError ?? status()).textContent = String(error);
+    } finally {
+      workspaceChanging = false;
+    }
+  };
+  const showForm = (draft: typeof workspaceDraft) => {
+    workspaceDraft = draft;
+    workspaceDeleteId = null;
+    renderEditor();
+    app.querySelector<HTMLElement>(draft ? "#workspace-name" : "#workspace-add")?.focus();
+  };
+  add.addEventListener("click", () => showForm({ name: "", icon: "" }));
+
+  panel.querySelectorAll<HTMLElement>(".workspace-row").forEach((row, index) => {
+    const workspace = workspaceList.workspaces[index];
+    row.dataset.workspaceId = workspace.id;
+    row.querySelector<HTMLElement>(".workspace-row-name")!.textContent = workspace.name;
+    row.querySelector<HTMLElement>(".workspace-row-icon")!.textContent = workspace.icon;
+    const bind = (action: string, label: string, click: () => void) => {
+      const button = row.querySelector<HTMLButtonElement>(`[data-action="${action}"]`);
+      button?.setAttribute("aria-label", `${label} ${workspace.name}`);
+      button?.addEventListener("click", click);
+    };
+    const id = workspace.id;
+    bind("activate", "Switch to", () => void report({ type: "activate", id }, "Workspace switched"));
+    bind("edit", "Edit", () => showForm({ ...workspace }));
+    bind("up", "Move up", () => void report({ type: "move", id, index: index - 1 }, "Workspace order updated"));
+    bind("down", "Move down", () => void report({ type: "move", id, index: index + 1 }, "Workspace order updated"));
+    bind("delete", "Delete", () => {
+      workspaceDraft = null;
+      workspaceDeleteId = id;
+      renderEditor();
+      app.querySelector<HTMLButtonElement>(".workspace-delete .tile-cancel")?.focus();
+    });
+  });
+
+  const form = panel.querySelector<HTMLFormElement>("#workspace-form");
+  const draft = workspaceDraft;
+  if (form && draft) {
+    const name = form.querySelector<HTMLInputElement>("#workspace-name")!;
+    const icon = form.querySelector<HTMLInputElement>("#workspace-icon")!;
+    name.value = draft.name;
+    icon.value = draft.icon;
+    name.addEventListener("input", () => { draft.name = name.value; });
+    icon.addEventListener("input", () => { draft.icon = icon.value; });
+    bindEmojiField(icon, form.querySelector<HTMLButtonElement>(".workspace-emoji-picker")!,
+      form.querySelector<HTMLElement>(".tile-form-error")!);
+    form.querySelector(".tile-cancel")!.addEventListener("click", () => showForm(null));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const fields = { name: name.value, icon: icon.value };
+      if (draft.id) void report({ type: "update", id: draft.id, ...fields }, "Workspace updated");
+      else void report({ type: "create", ...fields }, "Workspace created");
+    });
+  }
+  const pendingDelete = workspaceList.workspaces.find(({ id }) => id === workspaceDeleteId);
+  if (pendingDelete) {
+    panel.querySelector<HTMLElement>(".workspace-delete-message")!.textContent =
+      `Delete ${pendingDelete.name} and all its shortcuts?`;
+    panel.querySelector(".workspace-delete .tile-cancel")!.addEventListener("click", () => showForm(null));
+    panel.querySelector(".workspace-delete-confirm")!.addEventListener("click", () =>
+      void report({ type: "delete", id: pendingDelete.id }, "Workspace deleted"));
+  }
+}
+
 function renderEditor() {
   const nameRequired = tileForm?.kind === "folder";
   const nameHint = nameRequired ? "(Required)" : tileForm ? tileNameHints[tileForm.kind] : undefined;
-  const tabs = [["tiles", "Tiles"], ["edit-tile", "Edit tile"], ["appearance", "Appearance"], ["theme", "Theme"], ["misc", "Behavior"], ["about", "About"]] as const;
+  const tabs = [["tiles", "Tiles"], ["edit-tile", "Edit tile"], ["workspace", "Workspace"], ["appearance", "Appearance"], ["theme", "Theme"], ["misc", "Behavior"], ["about", "About"]] as const;
   const inactive = (tab: EditorTab) => editorTab === tab ? "" : 'inert aria-hidden="true"';
   app.innerHTML = `
     <section class="settings" aria-label="Palette settings">
@@ -1753,6 +1987,8 @@ function renderEditor() {
       </div><div id="edit-tile-panel" role="tabpanel" aria-label="Edit tile" ${inactive("edit-tile")}>
         ${settingsHeading("Edit tile", selectedTile ? "Manage the tile selected on your palette." : "Select a tile on the palette to edit it.")}
         ${selectedTile && editorTab === "edit-tile" ? selectedTileForm(selectedTile) : ""}
+      </div><div id="workspace-panel" role="tabpanel" aria-label="Workspace" ${inactive("workspace")}>
+        ${editorTab === "workspace" ? workspaceSettings() : ""}
       </div><div class="appearance-panel" id="appearance-panel" role="tabpanel" aria-label="Appearance" ${inactive("appearance")}>
         ${settingsHeading("Appearance", "Adjust the shape and spacing of your palette.")}
         ${["Geometry", "Spacing"].map((group) => `
@@ -1834,6 +2070,7 @@ function renderEditor() {
   `;
 
   applyPreferences();
+  if (editorTab === "workspace") bindWorkspaceSettings(app.querySelector<HTMLElement>("#workspace-panel")!);
   const hotkey = app.querySelector<HTMLInputElement>("#palette-hotkey");
   if (hotkey) {
     hotkey.value = paletteHotkey ? displayHotkey(paletteHotkey) : "";
@@ -1937,20 +2174,23 @@ function renderEditor() {
   app.querySelectorAll<HTMLButtonElement>(".tile-source").forEach((source) => {
     const kind = source.dataset.kind as TileKind;
     source.addEventListener("dragstart", (event) => {
+      const workspaceId = workspaceList.activeId;
       event.dataTransfer?.setData("application/x-wayfinder-tile", kind);
+      event.dataTransfer?.setData("application/x-wayfinder-workspace", workspaceId);
       event.dataTransfer?.setData("text/plain", `wayfinder-tile:${kind}`);
       if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
-      void invoke("begin_tile_drag", { kind });
+      void invoke("begin_tile_drag", { kind, workspaceId });
     });
     source.addEventListener("dragend", () => {
       void invoke("end_tile_drag");
     });
     source.addEventListener("click", async () => {
+      const workspaceId = workspaceList.activeId;
       try {
-        const items = await invoke<Shortcut[]>("list_shortcuts");
+        const items = await invoke<Shortcut[]>("list_shortcuts", { workspaceId });
         const rootCount = items.filter((item) => !item.parentId).length;
         if (rootCount >= MAX_ITEMS) throw new Error(`Root ring is full (${MAX_ITEMS} items)`);
-        openTileForm(kind, rootCount, null);
+        openTileForm(kind, rootCount, null, workspaceId);
       } catch (error) {
         const status = app.querySelector<HTMLElement>(".settings-status");
         if (status) status.textContent = String(error);
@@ -2014,7 +2254,8 @@ function renderEditor() {
       const name = nameField.value;
       const value = valueField?.value ?? "";
       try {
-        await invoke("create_tile", { kind: current.kind, name, value, index: current.index, parentId: current.parentId, color: selectedColor() });
+        await invoke("create_tile", { kind: current.kind, name, value, index: current.index, parentId: current.parentId, color: selectedColor(), workspaceId: current.workspaceId });
+        if (tileForm !== current) return;
         tileForm = null;
         renderEditor();
         app.querySelector<HTMLElement>(".settings-status")!.textContent = "Tile added";
@@ -2028,9 +2269,10 @@ function renderEditor() {
   observeEditorHeight();
 }
 
-function openTileForm(kind: TileKind, index: number, parentId: string | null) {
+function openTileForm(kind: TileKind, index: number, parentId: string | null, workspaceId: string) {
+  if (workspaceId !== workspaceList.activeId) return;
   editorTab = "tiles";
-  tileForm = { kind, index, parentId };
+  tileForm = { kind, index, parentId, workspaceId };
   renderEditor();
 }
 
@@ -2069,7 +2311,14 @@ function scheduleAppearanceSave(immediate = false) {
 
 async function startEditor() {
   try {
+    await listen("workspaces-changed", () => {
+      void invoke<WorkspaceList>("get_workspaces").then(applyEditorWorkspaces).catch((error) => {
+        const status = app.querySelector<HTMLElement>(".settings-status");
+        if (status) status.textContent = String(error);
+      });
+    });
     await listen<TileSelection | null>("tile-selection-changed", ({ payload }) => {
+      if (payload && payload.workspaceId !== workspaceList.activeId) return;
       if (!payload || selectedTile?.item.id !== payload.item.id || editorTab !== "edit-tile" || tileForm) {
         selectedTile = payload;
         tileForm = null;
@@ -2078,18 +2327,21 @@ async function startEditor() {
         if (payload) app.scrollTop = 0;
       }
     });
-    await listen<[TileKind, number, string | null]>("tile-form-requested", (event) => {
-      const [kind, index, parentId] = event.payload;
-      openTileForm(kind, index, parentId);
+    await listen<[TileKind, number, string | null, string]>("tile-form-requested", (event) => {
+      openTileForm(...event.payload);
     });
-    [appearance, paletteHotkey] = await Promise.all([
+    const [initialAppearance, initialHotkey, initialWorkspaces] = await Promise.all([
       invoke<Appearance>("get_appearance"),
       invoke<string | null>("get_palette_hotkey"),
+      invoke<WorkspaceList>("get_workspaces"),
     ]);
+    appearance = initialAppearance;
+    paletteHotkey = initialHotkey;
+    applyEditorWorkspaces(initialWorkspaces);
     renderEditor();
     window.addEventListener("focus", observeEditorHeight);
   } catch (error) {
-    app.textContent = `Could not load appearance settings: ${String(error)}`;
+    app.textContent = `Could not load palette settings: ${String(error)}`;
   }
 }
 
@@ -2099,6 +2351,7 @@ async function openPalette() {
   if (openingPalette) return;
   openingPalette = true;
   try {
+    closeWorkspacePicker();
     resetPaletteSearch();
     activeSubmenus = [];
     render("opening");
@@ -2117,14 +2370,60 @@ async function openPalette() {
   }
 }
 
+function applyWorkspacePalette(next: WorkspacePalette) {
+  if (next.revision <= workspaceList.revision) return;
+  const switched = workspaceList.activeId !== next.activeId;
+  workspaceList = next;
+  if (switched) {
+    if (!workspaceChanging) closeWorkspacePicker(true);
+    resetPaletteSearch();
+    focusedSubmenuId = null;
+    activeSubmenus = [];
+    selectedTileId = null;
+    cancelTileReorder(false);
+    incomingIndex = null;
+    incomingParentId = null;
+    incomingTileKind = null;
+    incomingTileWorkspaceId = null;
+    dragging = false;
+    shortcutIcons.clear();
+    pruneTilePool(new Set());
+  } else {
+    const byId = new Map(next.shortcuts.map((item) => [item.id, item]));
+    for (const previous of shortcuts) {
+      const current = byId.get(previous.id);
+      if (!current || current.path !== previous.path || current.kind !== previous.kind) {
+        shortcutIcons.delete(previous.id);
+        for (const level of [0, 1, 2] as const) tileElementPool.delete(`${level}:${previous.id}`);
+      }
+    }
+    pruneTilePool(new Set(byId.keys()));
+    const closed = activeSubmenus.findIndex((id) => byId.get(id)?.kind !== "submenu");
+    if (closed !== -1) activeSubmenus = activeSubmenus.slice(0, closed);
+    if (selectedTileId && !byId.has(selectedTileId)) resetEditSelection();
+    if (workspaceHighlight && !next.workspaces.some(({ id }) => id === workspaceHighlight)) {
+      workspaceHighlight = next.activeId;
+    }
+  }
+  shortcuts = next.shortcuts;
+  if (app.querySelector(".stage")) render();
+}
+
+async function refreshWorkspacePalette() {
+  applyWorkspacePalette(await invoke<WorkspacePalette>("get_workspace_palette"));
+}
+
 async function start() {
   let ready = false;
   try {
     await listen("palette-opening", () => {
       if (ready) void openPalette().catch((error) => showToast(String(error), true));
     });
-    await listen<TileKind>("tile-drag-start", (event) => {
-      incomingTileKind = event.payload;
+    await listen<[TileKind, string]>("tile-drag-start", ({ payload: [kind, workspaceId] }) => {
+      if (workspaceId !== workspaceList.activeId) return;
+      closeWorkspacePicker();
+      incomingTileKind = kind;
+      incomingTileWorkspaceId = workspaceId;
       tileDropHandled = false;
       if (dragging || searchQuery) {
         resetPaletteSearch();
@@ -2137,32 +2436,22 @@ async function start() {
       if (event.payload) previewDropAt(event.payload[0] / window.devicePixelRatio, event.payload[1] / window.devicePixelRatio);
       else clearDropTarget();
     });
-    await listen<[TileKind, number, number]>("tile-drag-finished", (event) => {
+    await listen<[TileKind, string, number, number]>("tile-drag-finished", (event) => {
       if (tileDropHandled) return;
-      const [kind, x, y] = event.payload;
+      const [kind, workspaceId, x, y] = event.payload;
       const target = dropTargetAt(x / window.devicePixelRatio, y / window.devicePixelRatio, kind);
-      if (target) void finishTileDrop(kind, target);
+      if (target) void finishTileDrop(kind, target, workspaceId);
     });
     await listen("tile-drag-end", () => {
       incomingTileKind = null;
+      incomingTileWorkspaceId = null;
       clearDropTarget();
     });
-    await listen("shortcuts-changed", async () => {
-      const updated = await invoke<Shortcut[]>("list_shortcuts");
-      for (const previous of shortcuts) {
-        const current = updated.find((item) => item.id === previous.id);
-        if (!current || current.path !== previous.path || current.kind !== previous.kind) {
-          shortcutIcons.delete(previous.id);
-          for (const level of [0, 1, 2] as const) tileElementPool.delete(`${level}:${previous.id}`);
-        }
-      }
-      shortcuts = updated;
-      pruneTilePool(new Set(shortcuts.map((item) => item.id)));
-      const closed = activeSubmenus.findIndex((id) => !shortcuts.some((item) => item.id === id && item.kind === "submenu"));
-      if (closed !== -1) activeSubmenus = activeSubmenus.slice(0, closed);
-      render();
-    });
+    const refresh = () => void refreshWorkspacePalette().catch((error) => showToast(String(error), true));
+    await listen("shortcuts-changed", refresh);
+    await listen("workspaces-changed", refresh);
     await listen("editor-closed", () => {
+      closeWorkspacePicker();
       if (editing) {
         editing = false;
         resetEditSelection();
@@ -2200,10 +2489,12 @@ async function start() {
         }
       }
     });
-    [shortcuts, appearance] = await Promise.all([
-      invoke<Shortcut[]>("list_shortcuts"),
+    const [initialPalette, initialAppearance] = await Promise.all([
+      invoke<WorkspacePalette>("get_workspace_palette"),
       invoke<Appearance>("get_appearance"),
     ]);
+    appearance = initialAppearance;
+    applyWorkspacePalette(initialPalette);
     applyPreferences();
     app.addEventListener("pointerdown", () => { suppressTileClick = false; }, true);
     app.addEventListener("click", (event) => {
@@ -2215,7 +2506,7 @@ async function start() {
     app.addEventListener("pointerup", (event) => {
       if (editing || tileReorder || incomingTileKind || externalDragging || suppressTileClick) return;
       const target = event.target as Element;
-      if (!target.closest(".shortcut, .segment, .edit-button, .focus-controls, .palette-search, .search-summary, .ring-empty, .submenu-empty-slot, .empty-prompt")) {
+      if (!target.closest(".shortcut, .segment, .edit-button, .focus-controls, .palette-search, .search-summary, .ring-empty, .submenu-empty-slot, .empty-prompt, .workspace-picker")) {
         void invoke("dismiss_palette");
       }
     });
@@ -2249,15 +2540,18 @@ async function start() {
         || (fallback.startsWith("wayfinder-tile:") ? fallback.slice("wayfinder-tile:".length) : "");
       const kind = tileDefinitions.find((item) => item.kind === raw)?.kind ?? incomingTileKind;
       if (!kind) return;
+      const workspaceId = event.dataTransfer?.getData("application/x-wayfinder-workspace") || incomingTileWorkspaceId;
       event.preventDefault();
       const target = dropTargetAt(event.clientX, event.clientY, kind);
-      if (target) void finishTileDrop(kind, target);
+      if (target) void finishTileDrop(kind, target, workspaceId);
       else clearDropTarget();
     });
     await getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type === "enter" || event.payload.type === "over") {
         if (event.payload.type === "enter" && event.payload.paths.length) {
+          closeWorkspacePicker();
           externalDragging = true;
+          externalDragWorkspaceId = workspaceList.activeId;
           incomingTileKind = "folder";
           tileDropHandled = false;
           if (searchQuery) {
@@ -2269,17 +2563,20 @@ async function start() {
       } else if (event.payload.type === "leave") {
         if (externalDragging) incomingTileKind = null;
         externalDragging = false;
+        externalDragWorkspaceId = null;
         clearDropTarget();
       } else if (event.payload.type === "drop") {
         if (event.payload.paths.length) {
           const target = dropTargetAt(event.payload.position.x / window.devicePixelRatio, event.payload.position.y / window.devicePixelRatio);
+          const workspaceId = externalDragWorkspaceId;
           externalDragging = false;
+          externalDragWorkspaceId = null;
           incomingTileKind = null;
           clearDropTarget();
-          void addDroppedPaths(event.payload.paths, target);
+          void addDroppedPaths(event.payload.paths, target, workspaceId);
         } else if (incomingTileKind) {
           const target = dropTargetAt(event.payload.position.x / window.devicePixelRatio, event.payload.position.y / window.devicePixelRatio);
-          if (target) void finishTileDrop(incomingTileKind, target);
+          if (target) void finishTileDrop(incomingTileKind, target, incomingTileWorkspaceId);
         }
       }
     });
@@ -2294,6 +2591,34 @@ async function start() {
 
 document.addEventListener("keydown", (event) => {
   if (event.isComposing) return;
+  if (!isEditorWindow && !event.defaultPrevented && !event.ctrlKey && !event.altKey && !event.metaKey
+    && event.key === "Tab" && workspaceList.workspaces.length && !busy && !workspaceChanging
+    && !incomingTileKind && !externalDragging && !tileReorder) {
+    event.preventDefault();
+    const { activeId, workspaces } = workspaceList;
+    if (workspaceHighlight === null) {
+      workspaceHighlight = activeId;
+      if (!editing || !selectedTileId) activeSubmenus = [];
+      render();
+    } else {
+      const index = workspaces.findIndex(({ id }) => id === workspaceHighlight);
+      const step = event.shiftKey ? -1 : 1;
+      workspaceHighlight = workspaces[(index + step + workspaces.length) % workspaces.length].id;
+      renderWorkspacePicker();
+    }
+    focusWorkspaceChoice();
+    return;
+  }
+  if (!isEditorWindow && workspaceHighlight !== null) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeWorkspacePicker(true);
+    } else if (event.key === "Enter" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
+      void switchWorkspace(workspaceHighlight);
+    }
+    return;
+  }
   if (event.key === "Escape") {
     if (searchQuery) {
       event.preventDefault();
