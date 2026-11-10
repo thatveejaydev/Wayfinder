@@ -130,8 +130,9 @@ const MAX_RECENT_SHORTCUTS = 100;
 let shortcuts: Shortcut[] = [];
 let workspaceList: WorkspaceList = { revision: -1, activeId: "", workspaces: [] };
 let workspaceHighlight: string | null = null;
-let workspacePreview: { id: string; roots: Shortcut[] } | null = null;
+let workspacePreview: { id: string; shortcuts: Shortcut[] } | null = null;
 let workspacePreviewRequest = 0;
+let previewSubmenus: string[] = [];
 let workspaceDraft: { id?: string; name: string; icon: string } | null = null;
 let workspaceDeleteId: string | null = null;
 let workspaceChanging = false;
@@ -311,7 +312,9 @@ function childrenOf(parentId: string | null): Shortcut[] {
 }
 
 function visibleChildrenOf(parentId: string | null): Shortcut[] {
-  const items = childrenOf(parentId);
+  const items = workspacePreview
+    ? workspacePreview.shortcuts.filter((item) => (item.parentId ?? null) === parentId)
+    : childrenOf(parentId);
   if (tileDraft?.item.parentId === parentId && items.length < MAX_ITEMS) {
     items.splice(tileDraft.index, 0, tileDraft.item);
   }
@@ -535,24 +538,35 @@ function angleNear(angle: number, center: number): number {
 }
 
 function menuCenter(parentId: string): number | null {
-  if (parentId === focusedSubmenuId) return null;
-  const roots = childrenOf(focusedSubmenuId);
+  const focus = workspaceHighlight === null ? focusedSubmenuId : null;
+  if (parentId === focus) return null;
+  const roots = visibleChildrenOf(focus);
   const rootIndex = roots.findIndex((item) => item.id === parentId);
   if (rootIndex >= 0) return segmentAngles(rootIndex, roots.length)[2];
-  const parent = shortcuts.find((item) => item.id === parentId);
+  const parent = (workspacePreview?.shortcuts ?? shortcuts).find((item) => item.id === parentId);
   if (!parent?.parentId) return null;
   const parentCenter = menuCenter(parent.parentId);
   if (parentCenter === null) return null;
-  const siblings = childrenOf(parent.parentId);
+  const siblings = visibleChildrenOf(parent.parentId);
   const index = siblings.findIndex((item) => item.id === parentId);
   return index >= 0 ? fanAngles(1, parentCenter, index, siblings.length)[2] : null;
 }
 
+function visibleSubmenus() {
+  return workspaceHighlight === null ? activeSubmenus : previewSubmenus;
+}
+
+function setVisibleSubmenus(submenus: string[]) {
+  if (workspaceHighlight === null) activeSubmenus = submenus;
+  else previewSubmenus = submenus;
+}
+
 function openSubmenu(item: Shortcut, level: number) {
   if (level >= 2 || item.kind !== "submenu") return false;
-  const next = level === 0 ? [item.id] : [activeSubmenus[0], item.id];
-  if (next.join("/") !== activeSubmenus.join("/")) {
-    activeSubmenus = next;
+  const submenus = visibleSubmenus();
+  const next = level === 0 ? [item.id] : [submenus[0], item.id];
+  if (next.join("/") !== submenus.join("/")) {
+    setVisibleSubmenus(next);
     const childLevel = level === 0 ? 1 : 2;
     refreshSubmenus(childLevel, childLevel);
     return true;
@@ -561,11 +575,12 @@ function openSubmenu(item: Shortcut, level: number) {
 }
 
 function hoverTile(item: Shortcut, level: number) {
-  if (workspaceHighlight || tileReorder || searchQuery.trim()) return;
+  const previewing = workspaceHighlight !== null;
+  if (tileReorder || (!previewing && searchQuery.trim())) return;
   if (item.kind === "submenu") {
     openSubmenu(item, level);
-  } else if ((!editing || !selectedTileId) && level < activeSubmenus.length) {
-    activeSubmenus = activeSubmenus.slice(0, level);
+  } else if ((previewing || !editing || !selectedTileId) && level < visibleSubmenus().length) {
+    setVisibleSubmenus(visibleSubmenus().slice(0, level));
     refreshSubmenus(level === 0 ? 1 : 2);
   }
 }
@@ -621,7 +636,7 @@ function submenuEdgeIndex(index: number, angle: number, [start, end, middle]: [n
 }
 
 function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = incomingTileKind): DropTarget | null {
-  if (tileDraft || searchQuery.trim()) return null;
+  if (tileDraft || workspaceHighlight !== null || searchQuery.trim()) return null;
   const position = palettePosition(clientX, clientY);
   if (!position) return null;
   const { radius, angle } = position;
@@ -1039,10 +1054,10 @@ function appendTile(
   const draft = item === tileDraft?.item;
   const searching = result !== undefined;
   const workspaceId = result?.workspace.id ?? previewWorkspaceId ?? workspaceList.activeId;
-  const activeSubmenu = !previewWorkspaceId && !searching && activeSubmenus.includes(item.id);
+  const activeSubmenu = !searching && visibleSubmenus().includes(item.id);
   const selected = editing && !searching && !previewWorkspaceId && selectedTileId === item.id;
   const name = shortcutName(item);
-  const action = editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
+  const action = previewWorkspaceId ? "Preview" : editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
   const location = result ? ` · ${result.breadcrumb}` : "";
   const labelText = `${action} ${name}${location}`;
   const searchKey = result ? `search:${result.id}` : undefined;
@@ -1113,10 +1128,11 @@ function appendTile(
   button.dataset.id = item.id;
   button.dataset.level = String(level);
   button.type = "button";
+  if (previewWorkspaceId) button.tabIndex = -1;
   positionTile(button, (innerRadius + outerRadius) / 2, middle);
   button.setAttribute("aria-label", labelText);
   if (searchSelected) button.setAttribute("aria-current", "true");
-  if (editing) button.setAttribute("aria-pressed", String(selected));
+  if (editing && !previewWorkspaceId) button.setAttribute("aria-pressed", String(selected));
   button.title = labelText;
   let tileIcon = "";
   if (item.kind === "submenu") {
@@ -1130,7 +1146,7 @@ function appendTile(
       : icon(item.kind);
     tileIcon = `<span class="shortcut-icon ${item.kind}">${thumbnail}</span>`;
   }
-  const removeBadge = editing && !draft && !searching ? `<span class="remove-badge" title="Remove">
+  const removeBadge = editing && !draft && !searching && !previewWorkspaceId ? `<span class="remove-badge" title="Remove">
     <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3L3 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
   </span>` : "";
   const draftHasValue = draft && Boolean(item.path || item.emoji || item.text);
@@ -1155,16 +1171,20 @@ function appendTile(
   const createdEntry: CachedTileEntry = { path, button, signature, item, level };
   if (!previewWorkspaceId) tileElementPool.set(poolKey, createdEntry);
 
-  const prepareReorder = (event: PointerEvent) => prepareTileReorder(event, createdEntry.item, createdEntry.level, path, button);
-  path.addEventListener("click", (event) => activate(createdEntry.item, createdEntry.level, event.shiftKey, workspaceId));
-  if (!searching) {
-    path.addEventListener("pointerdown", prepareReorder);
-    button.addEventListener("pointerdown", prepareReorder);
+  if (previewWorkspaceId) {
+    button.addEventListener("pointerdown", (event) => event.preventDefault());
+  } else {
+    const prepareReorder = (event: PointerEvent) => prepareTileReorder(event, createdEntry.item, createdEntry.level, path, button);
+    path.addEventListener("click", (event) => activate(createdEntry.item, createdEntry.level, event.shiftKey, workspaceId));
+    if (!searching) {
+      path.addEventListener("pointerdown", prepareReorder);
+      button.addEventListener("pointerdown", prepareReorder);
+    }
+    button.addEventListener("click", (event) => {
+      if (editing && (event.target as Element).closest(".remove-badge")) void removeItem(createdEntry.item);
+      else void activate(createdEntry.item, createdEntry.level, event.shiftKey, workspaceId);
+    });
   }
-  button.addEventListener("click", (event) => {
-    if (editing && (event.target as Element).closest(".remove-badge")) void removeItem(createdEntry.item);
-    else void activate(createdEntry.item, createdEntry.level, event.shiftKey, workspaceId);
-  });
   button.addEventListener("pointerenter", () => {
     path.classList.add("hovered");
     hoverTile(createdEntry.item, createdEntry.level);
@@ -1213,6 +1233,7 @@ function renderChildRing(parentId: string, level: 1 | 2, segments: SVGGElement, 
   const center = menuCenter(parentId);
   if (center === null) return;
   const items = visibleChildrenOf(parentId);
+  const previewId = workspaceHighlight === null ? undefined : workspacePreview?.id ?? workspaceList.activeId;
   const ring = submenuRadii()[level - 1];
   displayedChildAngles[level] = items.map((_, index) => {
     const [start, end] = fanAngles(level, center, index, items.length);
@@ -1221,8 +1242,9 @@ function renderChildRing(parentId: string, level: 1 | 2, segments: SVGGElement, 
   items.forEach((item, index) => {
     const [start, end, middle] = fanAngles(level, center, index, items.length);
     appendTile(item, level, start, end, middle, ring.inner, ring.outer, segments, layer,
-      animate ? { index, count: items.length } : undefined);
+      animate ? { index, count: items.length } : undefined, false, previewId);
   });
+  if (previewId) return;
   if (editing && items.length === 0) {
     const [start, end] = fanAngles(level, center, 0, 1);
     const path = document.createElementNS(SVG_NS, "path");
@@ -1241,22 +1263,24 @@ function renderChildRing(parentId: string, level: 1 | 2, segments: SVGGElement, 
 function refreshSubmenus(firstLevel: 1 | 2, openingLevel?: 1 | 2) {
   const segments = app.querySelector<SVGGElement>(".child-segments")!;
   const layer = app.querySelector<HTMLDivElement>(".item-layer")!;
+  const submenus = visibleSubmenus();
+  const previewing = workspaceHighlight !== null;
   for (const level of [1, 2] as const) {
     if (level < firstLevel) continue;
     window.cancelAnimationFrame(childLayoutAnimations[level]);
     displayedChildAngles[level] = [];
     segments.querySelectorAll(`[data-level="${level}"]`).forEach((node) => node.remove());
     layer.querySelectorAll(`[data-level="${level}"]`).forEach((node) => node.remove());
-    const parent = activeSubmenus[level - 1];
+    const parent = submenus[level - 1];
     if (parent) {
       renderChildRing(parent, level, segments, layer, appearance.animations && level === openingLevel);
-      updateChildDropIndicator(level, false);
+      if (!previewing) updateChildDropIndicator(level, false);
     }
   }
   app.querySelectorAll<HTMLElement | SVGGElement>(".segment, .shortcut").forEach((tile) => {
     const id = tile.dataset.id!;
-    tile.classList.toggle("active-submenu", activeSubmenus.includes(id));
-    if (editing) {
+    tile.classList.toggle("active-submenu", submenus.includes(id));
+    if (editing && !previewing) {
       const selected = selectedTileId === id;
       if (tile instanceof HTMLButtonElement) tile.setAttribute("aria-pressed", String(selected));
       else tile.classList.toggle("selected-tile", selected);
@@ -1337,6 +1361,7 @@ function closeWorkspacePicker(restoreFocus = false) {
   if (workspaceHighlight === null) return;
   workspaceHighlight = null;
   workspacePreview = null;
+  previewSubmenus = [];
   workspacePreviewRequest++;
   render();
   if (restoreFocus) {
@@ -1349,13 +1374,15 @@ async function previewWorkspace(id: string) {
   const request = ++workspacePreviewRequest;
   if (id === workspaceList.activeId) {
     workspacePreview = null;
+    previewSubmenus = [];
     render("workspace-preview");
     return;
   }
   try {
-    const roots = await invoke<Shortcut[]>("get_workspace_preview", { workspaceId: id });
+    const previewShortcuts = await invoke<Shortcut[]>("get_workspace_preview", { workspaceId: id });
     if (request !== workspacePreviewRequest || workspaceHighlight !== id) return;
-    workspacePreview = { id, roots };
+    workspacePreview = { id, shortcuts: previewShortcuts };
+    previewSubmenus = [];
     render("workspace-preview");
   } catch (error) {
     if (request === workspacePreviewRequest && workspaceHighlight === id) showToast(String(error), true);
@@ -1401,7 +1428,7 @@ function render(transition?: "opening" | "search" | "workspace-preview") {
   const pageStart = Math.floor(selectedIndex / MAX_ITEMS) * MAX_ITEMS;
   const page = matches.slice(pageStart, pageStart + MAX_ITEMS);
   const roots = searching ? page.map(({ item }) => item)
-    : workspacePreview?.roots ?? visibleChildrenOf(focused?.id ?? null);
+    : visibleChildrenOf(focused?.id ?? null);
   window.cancelAnimationFrame(layoutAnimation);
   childLayoutAnimations.forEach((animation) => window.cancelAnimationFrame(animation));
   childLayoutAnimations = [0, 0, 0];
@@ -1419,7 +1446,7 @@ function render(transition?: "opening" | "search" | "workspace-preview") {
   const emptyWidth = OUTER - appearance.innerRadius;
 
   const stage = ensureStageShell();
-  stage.inert = pickerOpen || tileDraft !== null;
+  stage.inert = tileDraft !== null;
   stage.className = `stage ${dragging ? "is-dragging" : ""} ${editing ? "is-editing" : ""}`;
   const palette = stage.querySelector<HTMLElement>(".palette")!;
   const ringSvg = palette.querySelector<SVGSVGElement>(".ring-svg")!;
@@ -1486,13 +1513,15 @@ function render(transition?: "opening" | "search" | "workspace-preview") {
     const [start, end, middle] = segmentAngles(index, roots.length);
     const entering = animateOpening || (previousAngles && !previousAngles.has(result?.id ?? searchResultId(workspaceList.activeId, item.id)));
     appendTile(item, 0, start, end, middle, appearance.innerRadius, OUTER, segments, layer,
-      entering ? { index, count: roots.length } : undefined, !!result && selectedResult === result, workspacePreview?.id, result);
+      entering ? { index, count: roots.length } : undefined, !!result && selectedResult === result,
+      pickerOpen ? visibleWorkspaceId : undefined, result);
   });
   if ((animateOpening || previousAngles?.size) && !roots.length) {
     ringSvg.querySelector(".ring-empty")?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 145, easing: "ease-out" });
   }
-  if (!pickerOpen && !searching && activeSubmenus[0]) renderChildRing(activeSubmenus[0], 1, childSegments, layer, false);
-  if (!pickerOpen && !searching && activeSubmenus[1]) renderChildRing(activeSubmenus[1], 2, childSegments, layer, false);
+  const [firstSubmenu, secondSubmenu] = visibleSubmenus();
+  if (!searching && firstSubmenu) renderChildRing(firstSubmenu, 1, childSegments, layer, false);
+  if (!searching && secondSubmenu) renderChildRing(secondSubmenu, 2, childSegments, layer, false);
 
   if (!searching && focused) {
     const title = app.querySelector<HTMLElement>(".focus-title")!;
@@ -2557,8 +2586,12 @@ function applyWorkspacePalette(next: WorkspacePalette) {
       workspaceHighlight = next.activeId;
       workspacePreviewRequest++;
       workspacePreview = null;
+      previewSubmenus = [];
     }
-    if (workspacePreview && !next.workspaces.some(({ id }) => id === workspacePreview?.id)) workspacePreview = null;
+    if (workspacePreview && !next.workspaces.some(({ id }) => id === workspacePreview?.id)) {
+      workspacePreview = null;
+      previewSubmenus = [];
+    }
   }
   shortcuts = next.shortcuts;
   if (switched && !workspaceChanging && workspaceHighlight !== null) closeWorkspacePicker(true);
@@ -2712,8 +2745,10 @@ async function start() {
       if (tileReorder?.pointerId != null) cancelTileReorder();
     });
     document.addEventListener("pointerleave", () => {
-      if (!tileDraft && !searchQuery.trim() && !tileReorder && !incomingTileKind && activeSubmenus.length && !(editing && selectedTileId)) {
-        activeSubmenus = [];
+      const previewing = workspaceHighlight !== null;
+      if (!tileDraft && !tileReorder && !incomingTileKind && visibleSubmenus().length
+        && (previewing || (!searchQuery.trim() && !(editing && selectedTileId)))) {
+        setVisibleSubmenus([]);
         refreshSubmenus(1);
       }
     });

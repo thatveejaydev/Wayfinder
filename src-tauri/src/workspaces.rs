@@ -269,12 +269,7 @@ pub(crate) fn get_workspace_preview(
     workspace_id: String,
 ) -> Result<Vec<Shortcut>, String> {
     let store = state.lock().map_err(|error| error.to_string())?;
-    Ok(store
-        .shortcuts(&workspace_id)?
-        .iter()
-        .filter(|shortcut| shortcut.parent_id.is_none())
-        .cloned()
-        .collect())
+    Ok(store.shortcuts(&workspace_id)?.clone())
 }
 
 #[tauri::command]
