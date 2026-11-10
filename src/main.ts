@@ -20,7 +20,7 @@ type TileSelection = { item: Omit<Shortcut, "preview">; level: number };
 type EditorTab = "tiles" | "edit-tile" | "appearance" | "theme" | "misc";
 type InstalledApp = { name: string; path: string };
 const tileDefinitions: { kind: TileKind; label: string; detail: string }[] = [
-  { kind: "submenu", label: "Submenu", detail: "Open an outer ring of tiles" },
+  { kind: "submenu", label: "Submenu", detail: "Click to focus on a group of tiles" },
   { kind: "text", label: "Text", detail: "Copy a saved snippet" },
   { kind: "folder", label: "Folder", detail: "Open a folder in Explorer" },
   { kind: "webpage", label: "Webpage", detail: "Open a saved link" },
@@ -80,6 +80,7 @@ let incomingTileKind: TileKind | null = null;
 let incomingIndex: number | null = null;
 let incomingParentId: string | null = null;
 let activeSubmenus: string[] = [];
+let focusedSubmenuId: string | null = null;
 let displayedAngles: [number, number][] = [];
 let layoutAnimation = 0;
 let displayedChildAngles: [number, number][][] = [[], [], []];
@@ -291,7 +292,8 @@ function angleNear(angle: number, center: number): number {
 }
 
 function menuCenter(parentId: string): number | null {
-  const roots = childrenOf(null);
+  if (parentId === focusedSubmenuId) return null;
+  const roots = childrenOf(focusedSubmenuId);
   const rootIndex = roots.findIndex((item) => item.id === parentId);
   if (rootIndex >= 0) return segmentAngles(rootIndex, roots.length)[2];
   const parent = shortcuts.find((item) => item.id === parentId);
@@ -345,7 +347,7 @@ function palettePosition(clientX: number, clientY: number) {
 }
 
 function insertionIndex(clientX: number, clientY: number): number | null {
-  const roots = childrenOf(null);
+  const roots = childrenOf(focusedSubmenuId);
   if (roots.length >= MAX_ITEMS) return null;
   const position = palettePosition(clientX, clientY);
   if (!position) return null;
@@ -382,7 +384,8 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
     const center = menuCenter(parentId);
     if (center === null) continue;
     const items = childrenOf(parentId);
-    if (level < 2 && items.length) {
+    const deepest = level === 2 || focusedSubmenuId !== null;
+    if (!deepest && items.length) {
       const hovered = items.find((_, index) => {
         const [start, end] = fanAngles(level, center, index, items.length);
         const near = angleNear(angle, center);
@@ -395,11 +398,17 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
         return { parentId: hovered.id, index: children.length };
       }
     }
-    if (level === 2 && kind === "submenu") return null;
+    if (deepest && kind === "submenu") return null;
     const index = fanInsertionIndex(level, center, items.length, angle);
     return index === null ? null : { parentId, index };
   }
 
+  if (focusedSubmenuId !== null) {
+    const focused = shortcuts.find((item) => item.id === focusedSubmenuId);
+    if (kind === "submenu" && focused?.parentId) return null;
+    const index = insertionIndex(clientX, clientY);
+    return index === null ? null : { parentId: focusedSubmenuId, index };
+  }
   if (radius < appearance.innerRadius - 8 || radius > OUTER + 8) return null;
   const roots = childrenOf(null);
   if (roots.length) {
@@ -427,8 +436,8 @@ function reorderSlot(index: number, from: number, target: number): number {
 function updateDropIndicator(animate = true) {
   const placeholder = app.querySelector<SVGPathElement>(".root-drop-indicator");
   if (!placeholder) return;
-  const roots = childrenOf(null);
-  const active = incomingTileKind !== null && incomingParentId === null && incomingIndex !== null && roots.length < MAX_ITEMS;
+  const roots = childrenOf(focusedSubmenuId);
+  const active = incomingTileKind !== null && incomingParentId === focusedSubmenuId && incomingIndex !== null && roots.length < MAX_ITEMS;
   const reorder = tileReorder?.level === 0 ? tileReorder : null;
   const previewIndex = reorder?.target ?? (active ? incomingIndex : null);
   const count = roots.length + (active ? 1 : 0);
@@ -872,7 +881,10 @@ function refreshSubmenus(firstLevel: 1 | 2, openingLevel?: 1 | 2) {
 function render(animateOpening = false) {
   const animate = appearance.animations && animateOpening;
   cancelTileReorder(false);
-  const roots = childrenOf(null);
+  const focused = shortcuts.find((item) => item.id === focusedSubmenuId && item.kind === "submenu");
+  if (focusedSubmenuId !== null && !focused) activeSubmenus = [];
+  focusedSubmenuId = focused?.id ?? null;
+  const roots = childrenOf(focusedSubmenuId);
   window.cancelAnimationFrame(layoutAnimation);
   childLayoutAnimations.forEach((animation) => window.cancelAnimationFrame(animation));
   childLayoutAnimations = [0, 0, 0];
@@ -897,11 +909,14 @@ function render(animateOpening = false) {
           <path class="root-drop-indicator drop-indicator" />
         </svg>
         <div class="item-layer"></div>
-        <button class="edit-button" type="button" aria-label="${editing ? "Finish editing" : "Edit shortcuts"}" title="${editing ? "Done editing" : "Edit shortcuts"}" aria-pressed="${editing}">
+        ${focused ? `<div class="focus-controls" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%">
+          <span class="focus-title"></span>
+          <button class="focus-back" type="button">Back</button>
+        </div>` : `<button class="edit-button" type="button" aria-label="${editing ? "Finish editing" : "Edit shortcuts"}" title="${editing ? "Done editing" : "Edit shortcuts"}" aria-pressed="${editing}">
           <svg viewBox="0 0 24 24" aria-hidden="true">${editing
             ? '<path d="m9.2 16.3-4.5-4.5-1.7 1.7 6.2 6.2L21 7.9l-1.7-1.7z"/>'
             : `<path d="M10 2h4l.5 3 1.5.9 2.8-1.1 2 3.4-2.3 1.9v1.8l2.3 1.9-2 3.4-2.8-1.1-1.5.9-.5 3h-4l-.5-3-1.5-.9-2.8 1.1-2-3.4 2.3-1.9v-1.8L3.2 8.2l2-3.4L8 5.9 9.5 5 10 2Zm2 6a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z" fill-rule="evenodd" transform="translate(0 1)"/>`}</svg>
-        </button>
+        </button>`}
         ${!roots.length ? '<div class="empty-prompt"><span class="drop-arrow">↓</span><span>DRAG & DROP<br/>NEW ITEMS HERE</span></div>' : ""}
         <div class="toast" role="status" aria-live="polite"></div>
       </div>
@@ -923,7 +938,13 @@ function render(animateOpening = false) {
   if (activeSubmenus[0]) renderChildRing(activeSubmenus[0], 1, childSegments, layer, false);
   if (activeSubmenus[1]) renderChildRing(activeSubmenus[1], 2, childSegments, layer, false);
 
-  document.querySelector<HTMLButtonElement>(".edit-button")!.addEventListener("click", async () => {
+  if (focused) {
+    const title = app.querySelector<HTMLElement>(".focus-title")!;
+    title.textContent = focused.name || "Submenu";
+    title.title = title.textContent;
+    app.querySelector<HTMLButtonElement>(".focus-back")!.addEventListener("click", backFromFocus);
+  }
+  app.querySelector<HTMLButtonElement>(".edit-button")?.addEventListener("click", async () => {
     const nextEditing = !editing;
     try {
       await invoke("set_edit_window_visible", { visible: nextEditing });
@@ -966,9 +987,19 @@ function resetEditSelection() {
   void emitTo("editor", "tile-selection-changed", null).catch(() => {});
 }
 
+function backFromFocus() {
+  const focused = shortcuts.find((item) => item.id === focusedSubmenuId);
+  focusedSubmenuId = focused?.parentId ?? null;
+  activeSubmenus = [];
+  render();
+  const previousTile = Array.from(app.querySelectorAll<HTMLButtonElement>(".shortcut"))
+    .find((tile) => tile.dataset.id === focused?.id);
+  previousTile?.focus({ preventScroll: true });
+}
+
 async function activate(item: Shortcut, level: number, shiftKey: boolean) {
+  if (busy) return;
   if (editing) {
-    if (busy) return;
     selectedTileId = item.id;
     if (item.kind !== "submenu") activeSubmenus = activeSubmenus.slice(0, level);
     if (!openSubmenu(item, level)) render();
@@ -978,10 +1009,12 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean) {
     return;
   }
   if (item.kind === "submenu") {
-    openSubmenu(item, level);
+    focusedSubmenuId = item.id;
+    activeSubmenus = [];
+    render();
+    app.querySelector<HTMLButtonElement>(".focus-back")?.focus({ preventScroll: true });
     return;
   }
-  if (busy) return;
   busy = true;
   try {
     await invoke("dismiss_palette");
@@ -1004,7 +1037,7 @@ async function addDroppedPaths(paths: string[], target: DropTarget | null) {
   if (busy || !paths.length) return;
   busy = true;
   dragging = false;
-  const parentId = target?.parentId ?? null;
+  const parentId = target?.parentId ?? focusedSubmenuId;
   try {
     const added = await invoke<Shortcut[]>("add_paths", { paths, parentId, index: target?.index });
     shortcuts = await invoke<Shortcut[]>("list_shortcuts");
@@ -1539,7 +1572,7 @@ async function start() {
     app.addEventListener("pointerup", (event) => {
       if (editing || tileReorder || incomingTileKind || externalDragging || suppressTileClick) return;
       const target = event.target as Element;
-      if (!target.closest(".shortcut, .segment, .edit-button, .ring-empty, .submenu-empty-slot, .empty-prompt")) {
+      if (!target.closest(".shortcut, .segment, .edit-button, .focus-controls, .ring-empty, .submenu-empty-slot, .empty-prompt")) {
         void invoke("dismiss_palette");
       }
     });
@@ -1616,6 +1649,10 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (tileReorder?.started) {
       cancelTileReorder();
+      return;
+    }
+    if (focusedSubmenuId !== null) {
+      backFromFocus();
       return;
     }
     if (editing) {

@@ -170,6 +170,40 @@ button { font: inherit; }
   fill: currentColor;
 }
 
+.focus-controls {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(220px, var(--focus-width));
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+}
+
+.focus-title {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: max(12px, calc(16px * var(--content-scale, 1)));
+  font-weight: 600;
+}
+
+.focus-back {
+  padding: 5px 10px;
+  border: 1px solid var(--palette-border);
+  border-radius: 6px;
+  color: var(--palette-background-text);
+  background: var(--palette-background);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.focus-back:hover, .focus-back:focus-visible {
+  border-color: var(--palette-highlight);
+}
+
 .item-layer {
   position: absolute;
   inset: 0;
