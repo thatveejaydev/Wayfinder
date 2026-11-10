@@ -4,6 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { version as appVersion } from "../src-tauri/tauri.conf.json";
 import { indexShortcut, rankShortcutMatches } from "./shortcut_search";
+import tailwindColorTokens from "./tailwind_colors.json";
 import "./style.css";
 
 type Shortcut = {
@@ -14,10 +15,26 @@ type Shortcut = {
   preview: string | null;
   text?: string | null;
   parentId?: string | null;
+  color?: string | null;
 };
 
 type TileKind = "submenu" | "text" | "folder" | "webpage" | "app";
 type EditableTileKind = TileKind | "file";
+// Tailwind CSS 4.3.0 default theme colors, stored by token name in new tiles.
+const tailwindColors: Record<string, string> = tailwindColorTokens;
+const tailwindColorGroups = new Map<string, string[]>();
+for (const token of Object.keys(tailwindColors)) {
+  const family = token.split("-")[0];
+  if (!tailwindColorGroups.has(family)) tailwindColorGroups.set(family, []);
+  tailwindColorGroups.get(family)!.push(token);
+}
+
+function tileLabelColor(value?: string | null): string | null {
+  if (!value) return null;
+  if (Object.hasOwn(tailwindColors, value)) return tailwindColors[value];
+  return /^#[0-9a-f]{6}$/i.test(value) ? value : null;
+}
+
 const tileNameHints: Partial<Record<EditableTileKind, string>> = {
   app: "(Leave blank for icon only)",
   text: "(Optional · defaults to the first 12 characters)",
@@ -65,6 +82,7 @@ type Appearance = {
   tileCornerRadius: number;
   tilePadding: number;
   submenuPadding: number;
+  colorLabelDistance: number;
   theme: Theme;
   animations: boolean;
   openAtScreenCenter: boolean;
@@ -81,6 +99,7 @@ const sliderDefinitions: { key: AppearanceKey; label: string; min: number; max: 
   { key: "tileCornerRadius", label: "Tile corner radius", min: 0, max: 30, group: "Geometry" },
   { key: "tilePadding", label: "Tile padding", min: 0, max: 16, group: "Spacing" },
   { key: "submenuPadding", label: "Submenu padding", min: 0, max: 24, group: "Spacing" },
+  { key: "colorLabelDistance", label: "Color label distance", min: 0, max: 24, group: "Spacing" },
 ];
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -88,6 +107,7 @@ const isEditorWindow = new URLSearchParams(window.location.search).get("editor")
 const SVG_NS = "http://www.w3.org/2000/svg";
 const CENTER = 310;
 const OUTER = 231;
+const COLOR_LABEL_STROKE_WIDTH = 6;
 const MAX_ITEMS = 12;
 const RECENT_SHORTCUTS_KEY = "wayfinder.recent-shortcuts";
 const MAX_RECENT_SHORTCUTS = 100;
@@ -131,6 +151,7 @@ let appearance: Appearance = {
   tileCornerRadius: 0,
   tilePadding: 5,
   submenuPadding: 8,
+  colorLabelDistance: 7,
   theme: { mode: "dark", background: null, highlight: null, border: null },
   animations: true,
   openAtScreenCenter: true,
@@ -210,9 +231,13 @@ function positionTile(button: HTMLButtonElement, radius: number, angle: number) 
   button.style.setProperty("--submenu-angle", `${angle}deg`);
 }
 
-function positionSegment(segment: SVGGElement, shape: string, angle: number) {
-  for (const path of segment.children) path.setAttribute("d", shape);
-  segment.style.setProperty("--submenu-angle", `${angle}deg`);
+function positionSegment(segment: SVGGElement, start: number, end: number, inner: number, outer: number) {
+  const [hitArea, surface, accent] = segment.children;
+  const paths = ringSegmentPaths(start, end, inner, outer, Boolean(accent));
+  hitArea.setAttribute("d", paths.tile);
+  surface.setAttribute("d", paths.tile);
+  accent?.setAttribute("d", paths.accent);
+  segment.style.setProperty("--submenu-angle", `${(start + end) / 2}deg`);
 }
 
 function loadShortcutIcon(item: Shortcut, container: HTMLElement) {
@@ -336,7 +361,15 @@ function submenuRadii(): { inner: number; outer: number }[] {
   ];
 }
 
-function ringSegmentPath(start: number, end: number, innerRadius: number, outerRadius: number): string {
+function roundedAccentEnd(arc: [number, number], corner: [number, number], side: [number, number], scale: number) {
+  // Use the half of the corner nearest the outer arc, leaving the tile's side clear.
+  const expand = (value: number) => CENTER + (value - CENTER) * scale;
+  const control = arc.map((value, index) => expand((value + corner[index]) / 2));
+  const end = arc.map((value, index) => expand((value + 2 * corner[index] + side[index]) / 4));
+  return { control: control.join(" "), end: end.join(" ") };
+}
+
+function ringSegmentPaths(start: number, end: number, innerRadius: number, outerRadius: number, withAccent: boolean) {
   const outerGap = appearance.tilePadding / outerRadius * 180 / Math.PI;
   const innerGap = appearance.tilePadding / innerRadius * 180 / Math.PI;
   const outerStart = start + outerGap;
@@ -349,9 +382,8 @@ function ringSegmentPath(start: number, end: number, innerRadius: number, outerR
   const [ix2, iy2] = point(innerRadius, innerEnd);
   const [ixm, iym] = point(innerRadius, (innerStart + innerEnd) / 2);
   const [ix1, iy1] = point(innerRadius, innerStart);
-  const sharpPath = `M ${ox1} ${oy1} A ${outerRadius} ${outerRadius} 0 0 1 ${oxm} ${oym} A ${outerRadius} ${outerRadius} 0 0 1 ${ox2} ${oy2} L ${ix2} ${iy2} A ${innerRadius} ${innerRadius} 0 0 0 ${ixm} ${iym} A ${innerRadius} ${innerRadius} 0 0 0 ${ix1} ${iy1} Z`;
-  if (!appearance.tileCornerRadius) return sharpPath;
-
+  const sharpEdge = `M ${ox1} ${oy1} A ${outerRadius} ${outerRadius} 0 0 1 ${oxm} ${oym} A ${outerRadius} ${outerRadius} 0 0 1 ${ox2} ${oy2}`;
+  const sharpPath = `${sharpEdge} L ${ix2} ${iy2} A ${innerRadius} ${innerRadius} 0 0 0 ${ixm} ${iym} A ${innerRadius} ${innerRadius} 0 0 0 ${ix1} ${iy1} Z`;
   const sideLength = Math.min(Math.hypot(ox1 - ix1, oy1 - iy1), Math.hypot(ox2 - ix2, oy2 - iy2));
   const corner = Math.min(
     appearance.tileCornerRadius,
@@ -359,12 +391,20 @@ function ringSegmentPath(start: number, end: number, innerRadius: number, outerR
     (outerEnd - outerStart) * Math.PI / 180 * outerRadius * 0.24,
     (innerEnd - innerStart) * Math.PI / 180 * innerRadius * 0.24,
   );
-  if (corner <= 0) return sharpPath;
+  const accentRadius = outerRadius + (appearance.borderThickness + COLOR_LABEL_STROKE_WIDTH) / 2 + appearance.colorLabelDistance;
+  const accentArc = (to: number) =>
+    `A ${accentRadius} ${accentRadius} 0 0 1 ${point(accentRadius, (start + end) / 2).join(" ")} A ${accentRadius} ${accentRadius} 0 0 1 ${point(accentRadius, to).join(" ")}`;
+  if (corner <= 0) {
+    const inset = (appearance.tilePadding + 3) / accentRadius * 180 / Math.PI;
+    const accent = withAccent ? `M ${point(accentRadius, start + inset).join(" ")} ${accentArc(end - inset)}` : "";
+    return { tile: sharpPath, accent };
+  }
   const outerAngle = corner / outerRadius * 180 / Math.PI;
   const innerAngle = corner / innerRadius * 180 / Math.PI;
   const [outerArcStartX, outerArcStartY] = point(outerRadius, outerStart + outerAngle);
   const [outerArcMiddleX, outerArcMiddleY] = point(outerRadius, (outerStart + outerEnd) / 2);
   const [outerArcEndX, outerArcEndY] = point(outerRadius, outerEnd - outerAngle);
+  const roundedEdge = `M ${outerArcStartX} ${outerArcStartY} A ${outerRadius} ${outerRadius} 0 0 1 ${outerArcMiddleX} ${outerArcMiddleY} A ${outerRadius} ${outerRadius} 0 0 1 ${outerArcEndX} ${outerArcEndY}`;
   const [innerArcEndX, innerArcEndY] = point(innerRadius, innerEnd - innerAngle);
   const [innerArcMiddleX, innerArcMiddleY] = point(innerRadius, (innerStart + innerEnd) / 2);
   const [innerArcStartX, innerArcStartY] = point(innerRadius, innerStart + innerAngle);
@@ -376,7 +416,19 @@ function ringSegmentPath(start: number, end: number, innerRadius: number, outerR
   const [innerEndSideX, innerEndSideY] = alongSide([ix2, iy2], [ox2, oy2]);
   const [innerStartSideX, innerStartSideY] = alongSide([ix1, iy1], [ox1, oy1]);
   const [outerStartSideX, outerStartSideY] = alongSide([ox1, oy1], [ix1, iy1]);
-  return `M ${outerArcStartX} ${outerArcStartY} A ${outerRadius} ${outerRadius} 0 0 1 ${outerArcMiddleX} ${outerArcMiddleY} A ${outerRadius} ${outerRadius} 0 0 1 ${outerArcEndX} ${outerArcEndY} Q ${ox2} ${oy2} ${outerEndSideX} ${outerEndSideY} L ${innerEndSideX} ${innerEndSideY} Q ${ix2} ${iy2} ${innerArcEndX} ${innerArcEndY} A ${innerRadius} ${innerRadius} 0 0 0 ${innerArcMiddleX} ${innerArcMiddleY} A ${innerRadius} ${innerRadius} 0 0 0 ${innerArcStartX} ${innerArcStartY} Q ${ix1} ${iy1} ${innerStartSideX} ${innerStartSideY} L ${outerStartSideX} ${outerStartSideY} Q ${ox1} ${oy1} ${outerArcStartX} ${outerArcStartY} Z`;
+  const tile = `${roundedEdge} Q ${ox2} ${oy2} ${outerEndSideX} ${outerEndSideY} L ${innerEndSideX} ${innerEndSideY} Q ${ix2} ${iy2} ${innerArcEndX} ${innerArcEndY} A ${innerRadius} ${innerRadius} 0 0 0 ${innerArcMiddleX} ${innerArcMiddleY} A ${innerRadius} ${innerRadius} 0 0 0 ${innerArcStartX} ${innerArcStartY} Q ${ix1} ${iy1} ${innerStartSideX} ${innerStartSideY} L ${outerStartSideX} ${outerStartSideY} Q ${ox1} ${oy1} ${outerArcStartX} ${outerArcStartY} Z`;
+  if (!withAccent) return { tile, accent: "" };
+
+  const scale = accentRadius / outerRadius;
+  const first = roundedAccentEnd([outerArcStartX, outerArcStartY], [ox1, oy1], [outerStartSideX, outerStartSideY], scale);
+  const last = roundedAccentEnd([outerArcEndX, outerArcEndY], [ox2, oy2], [outerEndSideX, outerEndSideY], scale);
+  const accentStart = point(accentRadius, outerStart + outerAngle).join(" ");
+  const accent = `M ${first.end} Q ${first.control} ${accentStart} ${accentArc(outerEnd - outerAngle)} Q ${last.control} ${last.end}`;
+  return { tile, accent };
+}
+
+function ringSegmentPath(start: number, end: number, innerRadius: number, outerRadius: number): string {
+  return ringSegmentPaths(start, end, innerRadius, outerRadius, false).tile;
 }
 
 function segmentPath(start: number, end: number): string {
@@ -588,7 +640,7 @@ function layoutRootTiles(target: [number, number][], from: [number, number][]) {
   const paint = (angles: [number, number][]) => {
     angles.forEach(([start, end], index) => {
       const middle = (start + end) / 2;
-      if (paths[index]) positionSegment(paths[index], segmentPath(start, end), middle);
+      if (paths[index]) positionSegment(paths[index], start, end, appearance.innerRadius, OUTER);
       if (buttons[index]) positionTile(buttons[index], (OUTER + appearance.innerRadius) / 2, middle);
     });
     displayedAngles = angles;
@@ -647,7 +699,7 @@ function updateChildDropIndicator(level: 1 | 2, animate = true) {
   const paint = (angles: [number, number][]) => {
     angles.forEach(([start, end], index) => {
       const middle = (start + end) / 2;
-      if (paths[index]) positionSegment(paths[index], ringSegmentPath(start, end, ring.inner, ring.outer), middle);
+      if (paths[index]) positionSegment(paths[index], start, end, ring.inner, ring.outer);
       if (buttons[index]) positionTile(buttons[index], (ring.inner + ring.outer) / 2, middle);
     });
     displayedChildAngles[level] = angles;
@@ -827,13 +879,7 @@ async function finishTileDrop(kind: TileKind, target: DropTarget) {
     return;
   }
   try {
-    if (kind === "submenu") {
-      await invoke("create_tile", { kind, name: "Submenu", value: "", index: target.index, parentId: target.parentId });
-      shortcuts = await invoke<Shortcut[]>("list_shortcuts");
-      render();
-    } else {
-      await invoke("open_tile_form", { kind, index: target.index, parentId: target.parentId });
-    }
+    await invoke("open_tile_form", { kind, index: target.index, parentId: target.parentId });
   } catch (error) {
     showToast(String(error), true);
   }
@@ -858,7 +904,15 @@ function appendTile(
   const surface = document.createElementNS(SVG_NS, "path");
   surface.classList.add("segment-surface");
   path.append(hitArea, surface);
-  positionSegment(path, ringSegmentPath(start, end, innerRadius, outerRadius), middle);
+  const color = tileLabelColor(item.color);
+  if (color) {
+    const accent = document.createElementNS(SVG_NS, "path");
+    accent.classList.add("segment-accent");
+    accent.setAttribute("stroke-width", String(COLOR_LABEL_STROKE_WIDTH));
+    path.style.setProperty("--tile-label-color", color);
+    path.appendChild(accent);
+  }
+  positionSegment(path, start, end, innerRadius, outerRadius);
   path.setAttribute("class", "segment");
   path.dataset.level = String(level);
   const searching = Boolean(searchQuery.trim());
@@ -1186,8 +1240,8 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean) {
     selectedTileId = item.id;
     if (item.kind !== "submenu") activeSubmenus = activeSubmenus.slice(0, level);
     if (!openSubmenu(item, level)) render();
-    const { id, name, kind, path, text } = item;
-    await emitTo("editor", "tile-selection-changed", { item: { id, name, kind, path, text }, level })
+    const { id, name, kind, path, text, color } = item;
+    await emitTo("editor", "tile-selection-changed", { item: { id, name, kind, path, text, color }, level })
       .catch((error) => showToast(String(error), true));
     return;
   }
@@ -1315,6 +1369,82 @@ function editableKind(kind: Shortcut["kind"]): EditableTileKind {
   return tileDefinitions.find((definition) => definition.kind === kind)?.kind ?? "file";
 }
 
+function tileColorField() {
+  const families = Array.from(tailwindColorGroups, ([family, tokens]) => {
+    const token = tokens.includes(`${family}-500`) ? `${family}-500` : tokens[0];
+    return `<button class="tile-color-swatch" type="button" data-color-family="${family}" data-color-token="${token}" aria-label="${colorName(family)}" title="${colorName(family)}" aria-pressed="false" style="--swatch: ${tailwindColors[token]}"></button>`;
+  }).join("");
+  return `<details class="tile-color-picker">
+    <summary>
+      <span>Color label <small class="tile-name-hint">(Optional)</small></span>
+      <span class="tile-color-preview" aria-hidden="true" hidden></span>
+      <svg class="tile-color-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5l5 5 5-5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </summary>
+    <div class="tile-color-options">
+      <button class="tile-color-clear" type="button" aria-label="Clear color label">Clear</button>
+      <div class="tile-color-families" role="group" aria-label="Color families">${families}</div>
+      <div class="tile-color-existing" hidden><span class="tile-color-swatch" aria-hidden="true"></span>Existing color</div>
+      <div class="tile-color-shades" hidden>
+        <div class="tile-shade-heading"></div>
+        <div class="tile-shade-grid" role="group" aria-label="Shades"></div>
+      </div>
+    </div>
+  </details>`;
+}
+
+function colorName(token: string) {
+  return token[0].toUpperCase() + token.slice(1).replace("-", " ");
+}
+
+function bindTileColor(form: HTMLFormElement, color?: string | null) {
+  const picker = form.querySelector<HTMLElement>(".tile-color-picker")!;
+  const preview = picker.querySelector<HTMLElement>(".tile-color-preview")!;
+  const clear = picker.querySelector<HTMLButtonElement>(".tile-color-clear")!;
+  const existing = picker.querySelector<HTMLElement>(".tile-color-existing")!;
+  const shades = picker.querySelector<HTMLElement>(".tile-color-shades")!;
+  const grid = picker.querySelector<HTMLElement>(".tile-shade-grid")!;
+  const heading = picker.querySelector<HTMLElement>(".tile-shade-heading")!;
+  const families = picker.querySelectorAll<HTMLButtonElement>("[data-color-family]");
+  let selected = color && tileLabelColor(color) ? color : null;
+  const render = () => {
+    const family = selected && Object.hasOwn(tailwindColors, selected) ? selected.split("-")[0] : null;
+    const tokens = family ? tailwindColorGroups.get(family)! : [];
+    preview.hidden = !selected;
+    preview.style.backgroundColor = tileLabelColor(selected) ?? "";
+    clear.disabled = !selected;
+    existing.hidden = !selected || family !== null;
+    existing.style.setProperty("--swatch", existing.hidden ? "transparent" : tileLabelColor(selected)!);
+    shades.hidden = tokens.length <= 1;
+    if (family && !shades.hidden && grid.dataset.family !== family) {
+      heading.textContent = `${colorName(family)} shades`;
+      grid.setAttribute("aria-label", heading.textContent);
+      grid.dataset.family = family;
+      grid.innerHTML = tokens.map((token) => `<button class="tile-shade" type="button" data-color-token="${token}" aria-label="${colorName(token)}" title="${colorName(token)}">
+        <span class="tile-color-swatch" style="--swatch: ${tailwindColors[token]}" aria-hidden="true"></span>
+        <span aria-hidden="true">${token.split("-")[1]}</span>
+      </button>`).join("");
+    }
+    families.forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.colorFamily === family)));
+    grid.querySelectorAll<HTMLButtonElement>(".tile-shade").forEach((button) => {
+      button.setAttribute("aria-pressed", String(button.dataset.colorToken === selected));
+    });
+  };
+  picker.addEventListener("click", (event) => {
+    const button = (event.target as Element).closest<HTMLButtonElement>("button");
+    if (button === clear) {
+      selected = null;
+    } else if (button?.dataset.colorToken) {
+      if (button.dataset.colorFamily && button.getAttribute("aria-pressed") === "true") return;
+      selected = button.dataset.colorToken;
+    } else {
+      return;
+    }
+    render();
+  });
+  render();
+  return () => selected;
+}
+
 const settingsIconPaths = {
   about: "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0zM12 11v5m0-8h.01",
   tiles: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z",
@@ -1354,6 +1484,7 @@ function selectedTileForm(selection: TileSelection) {
       <label for="edit-tile-name">Name <small class="tile-name-hint" hidden></small></label>
       <input id="edit-tile-name" name="name" type="text" maxlength="80" autocomplete="off" />
       <div class="tile-fields"></div>
+      ${tileColorField()}
       <div class="tile-form-error" role="alert"></div>
       <div class="tile-form-actions"><button class="tile-save" type="submit">Save changes</button></div>
     </form>`;
@@ -1367,6 +1498,7 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
   const error = form.querySelector<HTMLElement>(".tile-form-error")!;
   const save = form.querySelector<HTMLButtonElement>(".tile-save")!;
   const { item } = selection;
+  const selectedColor = bindTileColor(form, item.color);
   let kind = editableKind(item.kind);
   app.querySelector<HTMLElement>("[data-selection-name]")!.textContent = item.kind === "text"
     ? shortcutName(item)
@@ -1395,8 +1527,8 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
   });
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const details = { id: item.id, kind, name: name.value, value: value?.value ?? "" };
-    const controls = form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>("input, textarea, select, button");
+    const details = { id: item.id, kind, name: name.value, value: value?.value ?? "", color: selectedColor() };
+    const controls = form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>(":is(input, textarea, select, button):enabled");
     controls.forEach((control) => { control.disabled = true; });
     error.textContent = "";
     try {
@@ -1421,17 +1553,42 @@ function displayHotkey(combination: string) {
   }[part] ?? part.replace(/^(Key|Digit)(?=[A-Z0-9]$)/, ""))).join(" + ");
 }
 
+let editorHeightObserver: ResizeObserver | undefined;
+
+function observeEditorHeight() {
+  const settings = app.querySelector<HTMLElement>(".settings");
+  if (!settings) return;
+  const form = app.querySelector<HTMLFormElement>("#tile-create-form");
+  editorHeightObserver?.disconnect();
+  editorHeightObserver = new ResizeObserver(() => {
+    let height = settings.scrollHeight;
+    if (form) {
+      const backdrop = getComputedStyle(form.parentElement!);
+      const frame = form.offsetHeight - form.clientHeight;
+      height = Math.max(height, form.scrollHeight + frame + parseFloat(backdrop.paddingTop) + parseFloat(backdrop.paddingBottom));
+    }
+    void invoke("fit_editor_height", { height: Math.ceil(height) }).catch(() => {});
+  });
+  editorHeightObserver.observe(settings);
+  if (form) {
+    editorHeightObserver.observe(form);
+    for (const child of form.children) editorHeightObserver.observe(child);
+  }
+}
+
 function renderEditor() {
   const nameRequired = tileForm?.kind === "folder";
   const nameHint = nameRequired ? "(Required)" : tileForm ? tileNameHints[tileForm.kind] : undefined;
   const tabs = [["tiles", "Tiles"], ["edit-tile", "Edit tile"], ["appearance", "Appearance"], ["theme", "Theme"], ["misc", "Behavior"], ["about", "About"]] as const;
+  const inactive = (tab: EditorTab) => editorTab === tab ? "" : 'inert aria-hidden="true"';
   app.innerHTML = `
     <section class="settings" aria-label="Palette settings">
       <div class="settings-tabs" role="tablist" aria-label="Settings sections">
         ${tabs.map(([id, label]) => `<button class="settings-tab" data-tab="${id}" type="button" role="tab" aria-selected="${editorTab === id}" aria-controls="${id}-panel" tabindex="${editorTab === id ? 0 : -1}">${settingsIcon(id)}${label}</button>`).join("")}
       </div>
       <div class="settings-content">
-      ${editorTab === "tiles" ? `<div class="tiles-panel" id="tiles-panel" role="tabpanel" aria-label="Tiles">
+      <div class="settings-panels">
+      <div class="tiles-panel" id="tiles-panel" role="tabpanel" aria-label="Tiles" ${inactive("tiles")}>
         ${settingsHeading("Tiles", "Drag a tile onto the palette or click to add it at the end.")}
         <div class="tile-sources">${tileDefinitions.map(({ kind, label, detail }) => `
           <button class="tile-source" type="button" draggable="true" data-kind="${kind}" aria-label="Add ${label}">
@@ -1440,10 +1597,10 @@ function renderEditor() {
             <span class="tile-source-grip">${settingsIcon("grip")}</span>
           </button>
         `).join("")}</div>
-      </div>` : editorTab === "edit-tile" ? `<div id="edit-tile-panel" role="tabpanel" aria-label="Edit tile">
+      </div><div id="edit-tile-panel" role="tabpanel" aria-label="Edit tile" ${inactive("edit-tile")}>
         ${settingsHeading("Edit tile", selectedTile ? "Manage the tile selected on your palette." : "Select a tile on the palette to edit it.")}
-        ${selectedTile ? selectedTileForm(selectedTile) : ""}
-      </div>` : editorTab === "appearance" ? `<div class="appearance-panel" id="appearance-panel" role="tabpanel" aria-label="Appearance">
+        ${selectedTile && editorTab === "edit-tile" ? selectedTileForm(selectedTile) : ""}
+      </div><div class="appearance-panel" id="appearance-panel" role="tabpanel" aria-label="Appearance" ${inactive("appearance")}>
         ${settingsHeading("Appearance", "Adjust the shape and spacing of your palette.")}
         ${["Geometry", "Spacing"].map((group) => `
           <h2 class="settings-group-heading">${group}</h2>
@@ -1458,7 +1615,7 @@ function renderEditor() {
                 <input id="setting-${key}" data-key="${key}" type="range" min="${min}" max="${max}" value="${appearance[key]}" />
               </div>`).join("")}
           </div>`).join("")}
-      </div>` : editorTab === "theme" ? `<div class="theme-panel" id="theme-panel" role="tabpanel" aria-label="Theme">
+      </div><div class="theme-panel" id="theme-panel" role="tabpanel" aria-label="Theme" ${inactive("theme")}>
         ${settingsHeading("Theme", "Choose a preset or customize the palette colors.")}
         <div class="setting-row">
           <label for="theme-preset">Preset</label>
@@ -1476,7 +1633,7 @@ function renderEditor() {
             </span>
           </div>
         `).join("")}
-      </div>` : editorTab === "misc" ? `<div id="misc-panel" role="tabpanel" aria-label="Behavior">
+      </div><div id="misc-panel" role="tabpanel" aria-label="Behavior" ${inactive("misc")}>
         ${settingsHeading("Behavior", "Control how the palette opens and moves.")}
         <h2 class="settings-group-heading">Shortcut</h2>
         <div class="setting-row">
@@ -1497,14 +1654,15 @@ function renderEditor() {
           <span>Cast shadow</span>
           <input id="palette-cast-shadow" class="setting-switch" type="checkbox" role="switch" ${appearance.castShadow ? "checked" : ""} />
         </label>
-      </div>` : `<div id="about-panel" role="tabpanel" aria-label="About">
+      </div><div id="about-panel" role="tabpanel" aria-label="About" ${inactive("about")}>
         <header class="settings-heading"><h1>About Wayfinder</h1></header>
         <dl class="about-details">
           <div class="setting-row"><dt>Version</dt><dd>${appVersion}</dd></div>
           <div class="setting-row"><dt>Author</dt><dd>Vee Jay</dd></div>
         </dl>
         <p class="setting-note">© 2026 Vee Jay</p>
-      </div>`}
+      </div>
+      </div>
       <div class="settings-status" role="status" aria-live="polite"></div>
       </div>
     </section>
@@ -1515,6 +1673,7 @@ function renderEditor() {
         <label for="tile-name">Name${nameHint ? ` <small class="tile-name-hint">${nameHint}</small>` : ""}</label>
         <input id="tile-name" name="name" type="text" maxlength="80" ${nameRequired ? "required" : nameHint ? "" : 'placeholder="Optional name"'} autocomplete="off" />
         <div class="tile-fields">${tileValueFields(tileForm.kind, "tile-value")}</div>
+        ${tileColorField()}
         <div class="tile-form-error" role="alert"></div>
         <div class="tile-form-actions"><button class="tile-cancel" type="button">Cancel</button><button class="tile-save" type="submit">Save tile</button></div>
       </form>
@@ -1638,13 +1797,7 @@ function renderEditor() {
         const items = await invoke<Shortcut[]>("list_shortcuts");
         const rootCount = items.filter((item) => !item.parentId).length;
         if (rootCount >= MAX_ITEMS) throw new Error(`Root ring is full (${MAX_ITEMS} items)`);
-        if (kind === "submenu") {
-          await invoke("create_tile", { kind, name: "Submenu", value: "", index: rootCount, parentId: null });
-          const status = app.querySelector<HTMLElement>(".settings-status");
-          if (status) status.textContent = "Submenu tile added";
-        } else {
-          openTileForm(kind, rootCount, null);
-        }
+        openTileForm(kind, rootCount, null);
       } catch (error) {
         const status = app.querySelector<HTMLElement>(".settings-status");
         if (status) status.textContent = String(error);
@@ -1693,6 +1846,8 @@ function renderEditor() {
   const form = app.querySelector<HTMLFormElement>("#tile-create-form");
   if (form && tileForm) {
     const valueField = bindTileValueFields(form, form.querySelector<HTMLElement>(".tile-fields")!, tileForm.kind, true);
+    const nameField = form.querySelector<HTMLInputElement>("#tile-name")!;
+    const selectedColor = bindTileColor(form);
     form.querySelector<HTMLButtonElement>(".tile-cancel")!.addEventListener("click", () => {
       tileForm = null;
       renderEditor();
@@ -1703,10 +1858,10 @@ function renderEditor() {
       if (!current) return;
       const save = form.querySelector<HTMLButtonElement>(".tile-save")!;
       save.disabled = true;
-      const name = form.querySelector<HTMLInputElement>("#tile-name")!.value;
+      const name = nameField.value;
       const value = valueField?.value ?? "";
       try {
-        await invoke("create_tile", { kind: current.kind, name, value, index: current.index, parentId: current.parentId });
+        await invoke("create_tile", { kind: current.kind, name, value, index: current.index, parentId: current.parentId, color: selectedColor() });
         tileForm = null;
         renderEditor();
         app.querySelector<HTMLElement>(".settings-status")!.textContent = "Tile added";
@@ -1715,8 +1870,9 @@ function renderEditor() {
         save.disabled = false;
       }
     });
-    valueField?.focus();
+    (valueField ?? nameField).focus();
   }
+  observeEditorHeight();
 }
 
 function openTileForm(kind: TileKind, index: number, parentId: string | null) {
@@ -1772,6 +1928,7 @@ async function startEditor() {
       invoke<string | null>("get_palette_hotkey"),
     ]);
     renderEditor();
+    window.addEventListener("focus", observeEditorHeight);
   } catch (error) {
     app.textContent = `Could not load appearance settings: ${String(error)}`;
   }

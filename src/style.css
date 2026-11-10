@@ -76,10 +76,20 @@ button { font: inherit; }
   pointer-events: visiblePainted;
 }
 
-.segment-surface {
+.segment-surface, .segment-accent {
   pointer-events: none;
   transition: translate 110ms ease-out;
 }
+
+.segment-accent {
+  fill: none;
+  stroke: var(--tile-label-color);
+  stroke-linecap: round;
+  opacity: .3;
+  transition: translate 110ms ease-out, opacity 130ms ease;
+}
+
+.segment:is(:hover, .hovered) > .segment-accent { opacity: .85; }
 
 .segment:hover, .segment.hovered, .is-dragging .segment {
   fill: var(--palette-highlight, #5ba9f2);
@@ -291,7 +301,7 @@ button { font: inherit; }
 .shortcut { --hover-slide: calc(var(--tile-size, 620px) / 155); }
 
 :root:not([data-no-animations]) #app:not([data-reorder-level]) .stage:not(.is-dragging)
-  :is(.segment:is(:hover, .hovered) > .segment-surface, .shortcut:is(:hover, .hovered) > *) {
+  :is(.segment:is(:hover, .hovered) > :is(.segment-surface, .segment-accent), .shortcut:is(:hover, .hovered) > *) {
   translate: calc(var(--hover-slide) * cos(var(--submenu-angle)))
     calc(var(--hover-slide) * sin(var(--submenu-angle)));
 }
@@ -485,7 +495,7 @@ body.editor-window #app {
   scrollbar-color: var(--settings-line) var(--settings-window);
 }
 
-body.editor-window :is(button, input, textarea, select):focus-visible {
+body.editor-window :is(button, input, textarea, select, summary):focus-visible {
   outline: 2px solid var(--settings-accent);
   outline-offset: 2px;
 }
@@ -538,6 +548,9 @@ body.editor-window :is(button, input, textarea, select):focus-visible {
 .settings-icon { width: 16px; height: 16px; flex: none; }
 
 .settings-content { padding: clamp(15px, 3vw, 25px); }
+.settings-panels { display: grid; align-items: start; }
+.settings-panels > [role="tabpanel"] { grid-area: 1 / 1; min-width: 0; }
+.settings-panels > [inert] { visibility: hidden; }
 
 .settings-heading { margin-bottom: 18px; }
 
@@ -688,6 +701,65 @@ body.editor-window :is(button, input, textarea, select):focus-visible {
 }
 
 .tile-form :is(input, textarea, select) { width: 100%; }
+.tile-color-picker { margin-top: 7px; font-size: 12px; }
+.tile-color-picker summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  list-style: none;
+  cursor: pointer;
+}
+.tile-color-picker summary::-webkit-details-marker { display: none; }
+.tile-color-picker summary > :first-child { margin-inline-end: auto; }
+.tile-color-chevron { width: 14px; height: 14px; flex: none; color: var(--settings-muted); }
+.tile-color-picker[open] .tile-color-chevron { transform: rotate(180deg); }
+.tile-color-preview { width: 14px; height: 14px; border: 1px solid var(--settings-line); border-radius: 4px; }
+.tile-color-options { display: grid; gap: 7px; }
+.tile-color-options .tile-color-clear { justify-self: end; }
+.tile-color-clear { padding: 2px 0; border: 0; color: var(--settings-muted); background: transparent; cursor: pointer; }
+.tile-color-clear:disabled { opacity: .45; cursor: default; }
+.tile-color-families, .tile-shade-grid { display: grid; gap: 5px; }
+.tile-color-families { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+.tile-shade-grid { grid-template-columns: repeat(11, minmax(0, 1fr)); margin-top: 5px; }
+
+.tile-color-swatch {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  height: 23px;
+  padding: 0;
+  border: 1px solid var(--settings-line);
+  border-radius: 5px;
+  background: var(--swatch);
+}
+
+button.tile-color-swatch, .tile-shade { cursor: pointer; }
+.tile-color-swatch[aria-pressed="true"], .tile-shade[aria-pressed="true"] .tile-color-swatch {
+  box-shadow: inset 0 0 0 2px #fff, inset 0 0 0 3px #0008;
+}
+
+.tile-shade {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: var(--settings-muted);
+  background: transparent;
+  font-size: 10px;
+  text-align: center;
+}
+
+.tile-shade[aria-pressed="true"] .tile-color-swatch::after {
+  content: "✓";
+  color: white;
+  font-size: 13px;
+  text-shadow: 0 0 3px #000;
+}
+
+.tile-color-existing:not([hidden]) { display: flex; align-items: center; gap: 6px; color: var(--settings-muted); }
+.tile-color-existing .tile-color-swatch { width: 23px; }
 .tile-form textarea { min-height: 104px; resize: vertical; }
 .tile-path-row { display: flex; gap: 7px; }
 .tile-path-row input { flex: 1; }

@@ -14,7 +14,7 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, PhysicalPosition, State, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut as Hotkey, ShortcutState};
@@ -41,6 +41,8 @@ struct Shortcut {
     text: Option<String>,
     #[serde(default)]
     parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    color: Option<String>,
 }
 
 #[derive(Default)]
@@ -163,6 +165,8 @@ struct Appearance {
     #[serde(alias = "buttonPadding")]
     tile_padding: u32,
     submenu_padding: u32,
+    #[serde(default = "default_color_label_distance")]
+    color_label_distance: u32,
     #[serde(default)]
     theme: Theme,
     #[serde(default = "animations_enabled")]
@@ -181,6 +185,10 @@ fn animations_enabled() -> bool {
     true
 }
 
+fn default_color_label_distance() -> u32 {
+    7
+}
+
 impl Default for Appearance {
     fn default() -> Self {
         Self {
@@ -191,6 +199,7 @@ impl Default for Appearance {
             tile_corner_radius: 0,
             tile_padding: 5,
             submenu_padding: 8,
+            color_label_distance: default_color_label_distance(),
             theme: Theme::default(),
             animations: animations_enabled(),
             open_at_screen_center: default_center_position(),
@@ -208,16 +217,13 @@ impl Appearance {
         self.tile_corner_radius = self.tile_corner_radius.clamp(0, 30);
         self.tile_padding = self.tile_padding.clamp(0, 16);
         self.submenu_padding = self.submenu_padding.clamp(0, 24);
+        self.color_label_distance = self.color_label_distance.min(24);
         for color in [
             &mut self.theme.background,
             &mut self.theme.highlight,
             &mut self.theme.border,
         ] {
-            *color = color.take().filter(|value| {
-                value.len() == 7
-                    && value.starts_with('#')
-                    && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
-            });
+            *color = color.take().filter(|value| is_hex_color(value));
         }
         self
     }
@@ -457,6 +463,7 @@ fn create_tile(
     value: String,
     index: usize,
     parent_id: Option<String>,
+    color: Option<String>,
 ) -> Result<Shortcut, String> {
     let mut shortcuts = state.lock().map_err(|e| e.to_string())?;
     let depth = parent_depth(&shortcuts, parent_id.as_deref())?;
@@ -478,6 +485,7 @@ fn create_tile(
         preview: None,
         text,
         parent_id: parent_id.clone(),
+        color: tile_color(color)?,
     };
     let mut updated = shortcuts.clone();
     let position = sibling_insert_position(&updated, parent_id.as_deref(), index);
@@ -487,6 +495,29 @@ fn create_tile(
     app.emit_to("main", "shortcuts-changed", ())
         .map_err(|e| e.to_string())?;
     Ok(item)
+}
+
+fn is_hex_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn tile_color(color: Option<String>) -> Result<Option<String>, String> {
+    match color {
+        Some(value) if is_hex_color(&value) => Ok(Some(value.to_ascii_lowercase())),
+        Some(value) => {
+            let colors: serde_json::Value =
+                serde_json::from_str(include_str!("../../src/tailwind_colors.json"))
+                    .map_err(|error| error.to_string())?;
+            if colors.get(&value).is_some() {
+                Ok(Some(value))
+            } else {
+                Err("Choose a valid tile color".into())
+            }
+        }
+        None => Ok(None),
+    }
 }
 
 fn tile_fields(
@@ -592,13 +623,15 @@ fn update_tile(
     kind: String,
     name: String,
     value: String,
+    color: Option<String>,
 ) -> Result<Shortcut, String> {
     let mut shortcuts = state.lock().map_err(|e| e.to_string())?;
     let position = shortcuts
         .iter()
         .position(|item| item.id == id)
         .ok_or_else(|| "Shortcut not found".to_string())?;
-    let item = edited_tile(&shortcuts, &shortcuts[position], &kind, &name, &value)?;
+    let mut item = edited_tile(&shortcuts, &shortcuts[position], &kind, &name, &value)?;
+    item.color = tile_color(color)?;
     let mut updated = shortcuts.clone();
     updated[position] = item.clone();
     save_shortcuts(&app, &updated)?;
@@ -862,6 +895,7 @@ fn add_paths(
             },
             text: None,
             parent_id: parent_id.clone(),
+            color: None,
         };
         let insert_at = sibling_insert_position(
             &updated,
@@ -972,11 +1006,63 @@ fn set_edit_window_visible(app: AppHandle, visible: bool) -> Result<(), String> 
         .get_webview_window("editor")
         .ok_or_else(|| "Edit window not found".to_string())?;
     if visible {
+        let _ = fit_editor_height(app.clone(), 0);
         position_editor(&app);
         editor.show().map_err(|e| e.to_string())?;
         editor.set_focus().map_err(|e| e.to_string())?;
     } else {
         editor.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn fit_editor_height(app: AppHandle, height: u32) -> Result<(), String> {
+    let editor = app
+        .get_webview_window("editor")
+        .ok_or_else(|| "Edit window not found".to_string())?;
+    if editor.is_maximized().map_err(|error| error.to_string())? {
+        return Ok(());
+    }
+    let visible = editor.is_visible().map_err(|error| error.to_string())?;
+    let monitor_window = if visible {
+        editor.clone()
+    } else {
+        app.get_webview_window("main")
+            .unwrap_or_else(|| editor.clone())
+    };
+    let Some(monitor) = monitor_window
+        .current_monitor()
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(());
+    };
+    let work = monitor.work_area();
+    let inner = editor.inner_size().map_err(|error| error.to_string())?;
+    let outer = editor.outer_size().map_err(|error| error.to_string())?;
+    let scale = editor.scale_factor().map_err(|error| error.to_string())?;
+    let frame = outer.height.saturating_sub(inner.height);
+    let available = work.size.height.saturating_sub(frame).max(1);
+    let requested = (f64::from(height) * scale).ceil() as u32;
+    let target = inner.height.max(requested).min(available);
+    if target != inner.height {
+        editor
+            .set_size(PhysicalSize::new(inner.width, target))
+            .map_err(|error| error.to_string())?;
+        if visible {
+            let position = editor.outer_position().map_err(|error| error.to_string())?;
+            let bottom = work.position.y
+                + work
+                    .size
+                    .height
+                    .saturating_sub(target.saturating_add(frame)) as i32;
+            let y = position.y.clamp(work.position.y, bottom);
+            if y != position.y {
+                editor
+                    .set_position(PhysicalPosition::new(position.x, y))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
     }
     Ok(())
 }
@@ -994,8 +1080,9 @@ fn position_editor(app: &AppHandle) {
         editor.outer_size(),
         main.current_monitor(),
     ) {
-        let monitor_position = monitor.position();
-        let monitor_size = monitor.size();
+        let work = monitor.work_area();
+        let monitor_position = work.position;
+        let monitor_size = work.size;
         let right_edge = monitor_position.x + monitor_size.width as i32;
         let bottom_edge = monitor_position.y + monitor_size.height as i32;
         let right = position.x + size.width as i32 + 16;
@@ -1287,6 +1374,7 @@ pub fn run() {
             remove_shortcut,
             open_shortcut,
             set_edit_window_visible,
+            fit_editor_height,
             get_appearance,
             set_appearance,
             preview_appearance,
@@ -1318,18 +1406,29 @@ mod tests {
         assert_eq!(appearance.shell_size, 480);
         assert_eq!(appearance.inner_radius, 110);
         assert_eq!(appearance.tile_corner_radius, 0);
+        assert_eq!(appearance.color_label_distance, 7);
         assert!(matches!(appearance.theme.mode, ThemeMode::Dark));
         assert!(appearance.theme.background.is_none());
         assert!(appearance.animations);
     }
 
     #[test]
-    fn existing_shortcuts_load_without_text_field() {
+    fn existing_shortcuts_load_without_optional_fields() {
         let old = r#"[{"id":"1","path":"C:\\Users\\Example\\Pictures","name":"Pictures","kind":"folder","preview":null}]"#;
-        let shortcuts: Vec<Shortcut> = serde_json::from_str(old).unwrap();
+        let mut shortcuts: Vec<Shortcut> = serde_json::from_str(old).unwrap();
         assert_eq!(shortcuts[0].kind, "folder");
         assert!(shortcuts[0].text.is_none());
         assert!(shortcuts[0].parent_id.is_none());
+        assert!(shortcuts[0].color.is_none());
+        assert!(tile_color(Some("red".into())).is_err());
+        assert_eq!(
+            tile_color(Some("sky-500".into())).unwrap().as_deref(),
+            Some("sky-500")
+        );
+        shortcuts[0].color = tile_color(Some("#A0B1C2".into())).unwrap();
+        let saved = serde_json::to_string(&shortcuts).unwrap();
+        let restored: Vec<Shortcut> = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored[0].color.as_deref(), Some("#a0b1c2"));
     }
 
     #[test]
@@ -1351,6 +1450,7 @@ mod tests {
             preview: None,
             text: None,
             parent_id: parent_id.map(str::to_string),
+            color: None,
         };
         let mut items = vec![
             item("root", "submenu", None),
@@ -1370,7 +1470,7 @@ mod tests {
         assert_eq!(edited.parent_id, items[2].parent_id);
         assert_eq!(edited.kind, "webpage");
         assert_eq!(edited.path, "https://example.com/");
-        assert_eq!(edited.name, "example.com");
+        assert!(edited.name.is_empty());
         assert!(edited.text.is_none());
 
         assert!(move_tile(&mut items, "child-a", 1).unwrap());
