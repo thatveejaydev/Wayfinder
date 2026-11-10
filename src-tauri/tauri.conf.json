@@ -27,10 +27,10 @@
       },
       {
         "label": "editor",
-        "title": "Palette settings",
+        "title": "Radial / Palette settings",
         "url": "index.html?editor=1",
-        "width": 470,
-        "height": 440,
+        "width": 560,
+        "height": 470,
         "minWidth": 420,
         "minHeight": 400,
         "center": true,

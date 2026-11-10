@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { indexShortcut, rankShortcutMatches } from "./shortcut_search";
 import "./style.css";
 
 type Shortcut = {
@@ -20,9 +21,9 @@ type TileSelection = { item: Omit<Shortcut, "preview">; level: number };
 type EditorTab = "tiles" | "edit-tile" | "appearance" | "theme" | "misc";
 type InstalledApp = { name: string; path: string };
 const tileDefinitions: { kind: TileKind; label: string; detail: string }[] = [
-  { kind: "submenu", label: "Submenu", detail: "Click to focus on a group of tiles" },
+  { kind: "submenu", label: "Submenu", detail: "Group related shortcuts in a focused view" },
   { kind: "text", label: "Text", detail: "Copy a saved snippet" },
-  { kind: "folder", label: "Folder", detail: "Open a folder in Explorer" },
+  { kind: "folder", label: "Folder", detail: "Open a directory in File Explorer" },
   { kind: "webpage", label: "Webpage", detail: "Open a saved link" },
   { kind: "app", label: "App", detail: "Launch an app or shortcut" },
 ];
@@ -32,9 +33,9 @@ type ThemeColor = "background" | "highlight" | "border";
 type Theme = { mode: ThemeMode } & Record<ThemeColor, string | null>;
 
 const themeColors: { key: ThemeColor; label: string; light: string; dark: string }[] = [
-  { key: "background", label: "Palette background color", light: "#f0f2f5", dark: "#181818" },
-  { key: "highlight", label: "Palette highlight color", light: "#90c7fb", dark: "#5ba9f2" },
-  { key: "border", label: "Palette border color", light: "#a3aeb9", dark: "#3b3b3b" },
+  { key: "background", label: "Palette background", light: "#f0f2f5", dark: "#181818" },
+  { key: "highlight", label: "Tile highlight", light: "#90c7fb", dark: "#5ba9f2" },
+  { key: "border", label: "Tile border", light: "#a3aeb9", dark: "#3b3b3b" },
 ];
 const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
 
@@ -54,14 +55,14 @@ type Appearance = {
 
 type AppearanceKey = Exclude<keyof Appearance, "theme" | "animations" | "openAtScreenCenter" | "castShadow">;
 
-const sliderDefinitions: { key: AppearanceKey; label: string; min: number; max: number; unit?: string }[] = [
-  { key: "shellSize", label: "Tile size", min: 360, max: 760, unit: "px" },
-  { key: "textSize", label: "Text size", min: 8, max: 18, unit: "px" },
-  { key: "innerRadius", label: "Root shell inner radius", min: 60, max: 156, unit: "px" },
-  { key: "borderThickness", label: "Border thickness", min: 0, max: 6, unit: "px" },
-  { key: "tileCornerRadius", label: "Tile Corner radius", min: 0, max: 30, unit: "px" },
-  { key: "tilePadding", label: "Tile padding", min: 0, max: 16, unit: "px" },
-  { key: "submenuPadding", label: "Submenu padding", min: 0, max: 24, unit: "px" },
+const sliderDefinitions: { key: AppearanceKey; label: string; min: number; max: number; group: "Geometry" | "Spacing" }[] = [
+  { key: "shellSize", label: "Tile size", min: 360, max: 760, group: "Geometry" },
+  { key: "textSize", label: "Text size", min: 8, max: 18, group: "Geometry" },
+  { key: "innerRadius", label: "Center opening", min: 60, max: 156, group: "Geometry" },
+  { key: "borderThickness", label: "Border thickness", min: 0, max: 6, group: "Geometry" },
+  { key: "tileCornerRadius", label: "Tile corner radius", min: 0, max: 30, group: "Geometry" },
+  { key: "tilePadding", label: "Tile padding", min: 0, max: 16, group: "Spacing" },
+  { key: "submenuPadding", label: "Submenu padding", min: 0, max: 24, group: "Spacing" },
 ];
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -70,8 +71,12 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const CENTER = 310;
 const OUTER = 231;
 const MAX_ITEMS = 12;
+const RECENT_SHORTCUTS_KEY = "radial.recent-shortcuts";
+const MAX_RECENT_SHORTCUTS = 100;
 
 let shortcuts: Shortcut[] = [];
+let searchIndex: { source: Shortcut[]; entries: ReturnType<typeof indexShortcut<Shortcut>>[] } | undefined;
+let recentShortcutIds = isEditorWindow ? [] : loadRecentShortcutIds();
 const shortcutIcons = new Map<string, Promise<string | null>>();
 let editing = false;
 let dragging = false;
@@ -81,6 +86,8 @@ let incomingIndex: number | null = null;
 let incomingParentId: string | null = null;
 let activeSubmenus: string[] = [];
 let focusedSubmenuId: string | null = null;
+let searchQuery = "";
+let selectedSearchId: string | null = null;
 let displayedAngles: [number, number][] = [];
 let layoutAnimation = 0;
 let displayedChildAngles: [number, number][][] = [[], [], []];
@@ -132,6 +139,8 @@ function applyPreferences() {
     }
     const input = app.querySelector<HTMLInputElement>(`#theme-${key}`);
     if (input && input.value !== color.toLowerCase()) input.value = color;
+    const swatchValue = app.querySelector<HTMLElement>(`[data-theme-value="${key}"]`);
+    if (swatchValue) swatchValue.textContent = color.toUpperCase();
   }
   root.toggleAttribute("data-custom-highlight", theme.highlight !== null);
   if (theme.border) root.style.setProperty("--palette-custom-border", theme.border);
@@ -144,8 +153,6 @@ systemTheme.addEventListener("change", () => {
 
 function icon(kind: Shortcut["kind"]): string {
   switch (kind) {
-    case "submenu":
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><path d="M14 10h10l13 14-13 14H14l13-14Z" fill="currentColor"/></svg>`;
     case "text":
       return `<svg viewBox="0 0 48 48" aria-hidden="true"><rect x="8" y="7" width="32" height="34" rx="5" fill="#7795c9"/><path d="M15 18h18M15 24h18M15 30h12" stroke="white" stroke-width="3" stroke-linecap="round"/></svg>`;
     case "webpage":
@@ -206,6 +213,82 @@ function childrenOf(parentId: string | null): Shortcut[] {
 
 function shortcutName(item: Shortcut): string {
   return item.name || item.path.split(/[\\/]/).pop()?.replace(/\.(exe|lnk)$/i, "") || "App";
+}
+
+function searchMatches(query: string): Shortcut[] {
+  if (searchIndex?.source !== shortcuts) {
+    const byId = new Map(shortcuts.map((item) => [item.id, item]));
+    searchIndex = {
+      source: shortcuts,
+      entries: shortcuts.map((item) => indexShortcut(item, shortcutName(item), shortcutParents(item, (id) => byId.get(id)))),
+    };
+  }
+  return rankShortcutMatches(searchIndex.entries, query, recentShortcutIds);
+}
+
+function shortcutParents(item: Shortcut, findParent: (id: string) => Shortcut | undefined): string[] {
+  const parents: string[] = [];
+  const visited = new Set([item.id]);
+  let parentId = item.parentId;
+  while (parentId && !visited.has(parentId)) {
+    const parent = findParent(parentId);
+    if (!parent) break;
+    parents.unshift(shortcutName(parent));
+    visited.add(parentId);
+    parentId = parent.parentId;
+  }
+  return parents;
+}
+
+function shortcutBreadcrumb(item: Shortcut): string {
+  return shortcutParents(item, (id) => shortcuts.find((candidate) => candidate.id === id)).join(" › ") || "Main palette";
+}
+
+function loadRecentShortcutIds(): string[] {
+  try {
+    const saved: unknown = JSON.parse(window.localStorage.getItem(RECENT_SHORTCUTS_KEY) ?? "[]");
+    if (!Array.isArray(saved)) return [];
+    return Array.from(new Set(saved.filter((id): id is string => typeof id === "string"))).slice(0, MAX_RECENT_SHORTCUTS);
+  } catch {
+    return [];
+  }
+}
+
+function rememberShortcut(id: string) {
+  if (recentShortcutIds[0] === id) return;
+  recentShortcutIds = [id, ...recentShortcutIds.filter((recentId) => recentId !== id)].slice(0, MAX_RECENT_SHORTCUTS);
+  try {
+    window.localStorage.setItem(RECENT_SHORTCUTS_KEY, JSON.stringify(recentShortcutIds));
+  } catch {
+    // The current session still has its recent shortcuts if storage is unavailable.
+  }
+}
+
+function resetPaletteSearch() {
+  searchQuery = "";
+  selectedSearchId = null;
+}
+
+function bindPaletteSearch(field: HTMLInputElement) {
+  field.addEventListener("input", () => {
+    searchQuery = field.value;
+    render("search");
+  });
+  field.addEventListener("keydown", (event) => {
+    if (event.isComposing || !searchQuery.trim()) return;
+    const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    if (!step && event.key !== "Enter") return;
+    event.preventDefault();
+    const matches = searchMatches(searchQuery);
+    if (!matches.length) return;
+    const index = Math.max(0, matches.findIndex((item) => item.id === selectedSearchId));
+    if (step) {
+      selectedSearchId = matches[(index + step + matches.length) % matches.length].id;
+      render("search");
+    } else {
+      void activate(matches[index], 0, event.shiftKey);
+    }
+  });
 }
 
 function submenuRadii(): { inner: number; outer: number }[] {
@@ -318,7 +401,7 @@ function openSubmenu(item: Shortcut, level: number) {
 }
 
 function hoverTile(item: Shortcut, level: number) {
-  if (tileReorder) return;
+  if (tileReorder || searchQuery.trim()) return;
   if (item.kind === "submenu") {
     openSubmenu(item, level);
   } else if ((!editing || !selectedTileId) && level < activeSubmenus.length) {
@@ -371,6 +454,7 @@ function fanInsertionIndex(level: number, center: number, count: number, angle: 
 }
 
 function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = incomingTileKind): DropTarget | null {
+  if (searchQuery.trim()) return null;
   const position = palettePosition(clientX, clientY);
   if (!position) return null;
   const { radius, angle } = position;
@@ -434,6 +518,7 @@ function reorderSlot(index: number, from: number, target: number): number {
 }
 
 function updateDropIndicator(animate = true) {
+  if (searchQuery.trim()) return;
   const placeholder = app.querySelector<SVGPathElement>(".root-drop-indicator");
   if (!placeholder) return;
   const roots = childrenOf(focusedSubmenuId);
@@ -448,8 +533,6 @@ function updateDropIndicator(animate = true) {
     const [start, end] = segmentAngles(slot, count);
     return [start, end];
   });
-  const paths = Array.from(app.querySelectorAll<SVGGElement>(".ring-segments .segment"));
-  const buttons = Array.from(app.querySelectorAll<HTMLButtonElement>('.item-layer .shortcut[data-level="0"]'));
   app.querySelector<SVGCircleElement>(".ring-empty")?.style.setProperty("display", active ? "none" : "");
   app.querySelector<HTMLElement>(".empty-prompt")?.style.setProperty("display", active ? "none" : "");
   if (previewIndex !== null) {
@@ -460,8 +543,14 @@ function updateDropIndicator(animate = true) {
     placeholder.classList.remove("visible");
     placeholder.removeAttribute("d");
   }
+  const from = animate && displayedAngles.length === target.length ? displayedAngles : target;
+  layoutRootTiles(target, from);
+}
 
+function layoutRootTiles(target: [number, number][], from: [number, number][]) {
   window.cancelAnimationFrame(layoutAnimation);
+  const paths = app.querySelectorAll<SVGGElement>(".ring-segments .segment");
+  const buttons = app.querySelectorAll<HTMLButtonElement>('.item-layer .shortcut[data-level="0"]');
   const paint = (angles: [number, number][]) => {
     angles.forEach(([start, end], index) => {
       const middle = (start + end) / 2;
@@ -470,11 +559,11 @@ function updateDropIndicator(animate = true) {
     });
     displayedAngles = angles;
   };
-  const from = displayedAngles.length === target.length ? displayedAngles.map(([start, end]) => [start, end] as [number, number]) : target;
-  if (!appearance.animations || !animate || !target.some(([start, end], index) => start !== from[index][0] || end !== from[index][1])) {
+  if (!appearance.animations || !target.some(([start, end], index) => start !== from[index][0] || end !== from[index][1])) {
     paint(target);
     return;
   }
+  paint(from);
   const began = performance.now();
   const tick = (now: number) => {
     const progress = Math.min((now - began) / 150, 1);
@@ -727,6 +816,7 @@ function appendTile(
   segments: SVGGElement,
   layer: HTMLDivElement,
   entrance?: { index: number; count: number },
+  searchSelected = false,
 ) {
   const path = document.createElementNS(SVG_NS, "g");
   const hitArea = document.createElementNS(SVG_NS, "path");
@@ -737,26 +827,31 @@ function appendTile(
   positionSegment(path, ringSegmentPath(start, end, innerRadius, outerRadius), middle);
   path.setAttribute("class", "segment");
   path.dataset.level = String(level);
-  if (activeSubmenus.includes(item.id)) path.classList.add("active-submenu");
+  const searching = Boolean(searchQuery.trim());
+  const activeSubmenu = !searching && activeSubmenus.includes(item.id);
+  path.classList.toggle("active-submenu", activeSubmenu);
   path.dataset.id = item.id;
   const selected = editing && selectedTileId === item.id;
   path.classList.toggle("selected-tile", selected);
+  path.classList.toggle("search-selected", searchSelected);
   path.addEventListener("click", (event) => activate(item, level, event.shiftKey));
   segments.appendChild(path);
 
   const button = document.createElement("button");
   button.className = `shortcut${level ? ` child-shortcut level-${level}` : ""}`;
   button.classList.toggle("single-content", item.kind === "text" || item.kind === "submenu" || !item.name);
-  button.classList.toggle("active-submenu", activeSubmenus.includes(item.id));
+  button.classList.toggle("active-submenu", activeSubmenu);
   button.dataset.id = item.id;
   button.dataset.level = String(level);
   button.type = "button";
   positionTile(button, (innerRadius + outerRadius) / 2, middle);
   const name = shortcutName(item);
   const action = editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
-  button.setAttribute("aria-label", `${action} ${name}`);
+  const location = searching ? ` · ${shortcutBreadcrumb(item)}` : "";
+  button.setAttribute("aria-label", `${action} ${name}${location}`);
+  if (searchSelected) button.setAttribute("aria-current", "true");
   if (editing) button.setAttribute("aria-pressed", String(selected));
-  button.title = `${action} ${name}`;
+  button.title = `${action} ${name}${location}`;
   let tileIcon = "";
   if (item.kind === "submenu") {
     const offset = (outerRadius - innerRadius) / 2 - 12;
@@ -768,12 +863,12 @@ function appendTile(
       : icon(item.kind);
     tileIcon = `<span class="shortcut-icon ${item.kind}">${thumbnail}</span>`;
   }
-  button.innerHTML = `${tileIcon}${item.name ? '<span class="shortcut-label"></span>' : ""}${editing ? '<span class="remove-badge">×</span>' : ""}`;
+  button.innerHTML = `${tileIcon}${item.name || searching ? '<span class="shortcut-label"></span>' : ""}${editing ? '<span class="remove-badge">×</span>' : ""}`;
   if (!item.preview && (item.kind === "app" || item.kind === "webpage")) {
     loadShortcutIcon(item, button.querySelector<HTMLElement>(".shortcut-icon")!);
   }
   const label = button.querySelector<HTMLElement>(".shortcut-label");
-  if (label) label.textContent = item.name;
+  if (label) label.textContent = name;
   const prepareReorder = (event: PointerEvent) => prepareTileReorder(event, item, level, path, button);
   path.addEventListener("pointerdown", prepareReorder);
   button.addEventListener("pointerdown", prepareReorder);
@@ -878,28 +973,41 @@ function refreshSubmenus(firstLevel: 1 | 2, openingLevel?: 1 | 2) {
   });
 }
 
-function render(animateOpening = false) {
-  const animate = appearance.animations && animateOpening;
+function render(transition?: "opening" | "search") {
+  const animateOpening = appearance.animations && transition === "opening";
+  const animateSearch = appearance.animations && transition === "search";
+  const previousAngles = animateSearch ? new Map(Array.from(
+    app.querySelectorAll<SVGGElement>(".ring-segments .segment"),
+    (segment, index) => [segment.dataset.id, displayedAngles[index]] as const,
+  )) : null;
   cancelTileReorder(false);
   const focused = shortcuts.find((item) => item.id === focusedSubmenuId && item.kind === "submenu");
   if (focusedSubmenuId !== null && !focused) activeSubmenus = [];
   focusedSubmenuId = focused?.id ?? null;
-  const roots = childrenOf(focusedSubmenuId);
+  const searching = Boolean(searchQuery.trim());
+  const matches = searching ? searchMatches(searchQuery) : [];
+  const preferredIndex = matches.findIndex((item) => item.id === selectedSearchId);
+  if (preferredIndex < 0) selectedSearchId = null;
+  const selectedIndex = Math.max(0, preferredIndex);
+  const selectedResult = matches[selectedIndex];
+  const pageStart = Math.floor(selectedIndex / MAX_ITEMS) * MAX_ITEMS;
+  const roots = searching ? matches.slice(pageStart, pageStart + MAX_ITEMS) : childrenOf(focusedSubmenuId);
   window.cancelAnimationFrame(layoutAnimation);
   childLayoutAnimations.forEach((animation) => window.cancelAnimationFrame(animation));
   childLayoutAnimations = [0, 0, 0];
   displayedChildAngles = [[], [], []];
-  displayedAngles = roots.map((_, index) => {
+  const targetAngles = roots.map((_, index): [number, number] => {
     const [start, end] = segmentAngles(index, roots.length);
     return [start, end];
   });
+  displayedAngles = targetAngles;
   app.style.setProperty("--tile-size", `${appearance.shellSize}px`);
   app.style.setProperty("--content-scale", `${Math.min(1, appearance.shellSize / 620)}`);
   app.style.setProperty("--text-size", `${appearance.textSize}px`);
   app.style.setProperty("--border-thickness", `${appearance.borderThickness}px`);
   const emptyRadius = (OUTER + appearance.innerRadius) / 2;
   const emptyWidth = OUTER - appearance.innerRadius;
-  app.innerHTML = `
+  const stageMarkup = `
     <main class="stage ${dragging ? "is-dragging" : ""} ${editing ? "is-editing" : ""}">
       <div class="palette" aria-label="Radial shortcut palette">
         <svg class="ring-svg" viewBox="0 0 620 620" aria-hidden="true">
@@ -909,7 +1017,10 @@ function render(animateOpening = false) {
           <path class="root-drop-indicator drop-indicator" />
         </svg>
         <div class="item-layer"></div>
-        ${focused ? `<div class="focus-controls" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%">
+        ${searching ? `<div class="search-summary" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%" role="status">
+          <span>${matches.length > MAX_ITEMS ? `${pageStart + 1}–${pageStart + roots.length} of ` : ""}${matches.length ? `${matches.length} ${matches.length === 1 ? "match" : "matches"}` : "No matches"}</span>
+          ${selectedResult ? '<span class="search-breadcrumb"></span>' : ""}
+        </div>` : focused ? `<div class="focus-controls" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%">
           <span class="focus-title"></span>
           <button class="focus-back" type="button">Back</button>
         </div>` : `<button class="edit-button" type="button" aria-label="${editing ? "Finish editing" : "Edit shortcuts"}" title="${editing ? "Done editing" : "Edit shortcuts"}" aria-pressed="${editing}">
@@ -917,11 +1028,32 @@ function render(animateOpening = false) {
             ? '<path d="m9.2 16.3-4.5-4.5-1.7 1.7 6.2 6.2L21 7.9l-1.7-1.7z"/>'
             : `<path d="M10 2h4l.5 3 1.5.9 2.8-1.1 2 3.4-2.3 1.9v1.8l2.3 1.9-2 3.4-2.8-1.1-1.5.9-.5 3h-4l-.5-3-1.5-.9-2.8 1.1-2-3.4 2.3-1.9v-1.8L3.2 8.2l2-3.4L8 5.9 9.5 5 10 2Zm2 6a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z" fill-rule="evenodd" transform="translate(0 1)"/>`}</svg>
         </button>`}
-        ${!roots.length ? '<div class="empty-prompt"><span class="drop-arrow">↓</span><span>DRAG & DROP<br/>NEW ITEMS HERE</span></div>' : ""}
+        ${!searching && !roots.length ? '<div class="empty-prompt"><span class="drop-arrow">↓</span><span>DRAG & DROP<br/>NEW ITEMS HERE</span></div>' : ""}
         <div class="toast" role="status" aria-live="polite"></div>
       </div>
     </main>
   `;
+  const stage = app.querySelector(".stage");
+  if (stage) {
+    stage.outerHTML = stageMarkup;
+  } else {
+    app.innerHTML = `<label class="palette-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+      <input id="palette-search" type="text" aria-label="Search shortcuts" placeholder="Search shortcuts" autocomplete="off" spellcheck="false" />
+    </label>${stageMarkup}`;
+    bindPaletteSearch(app.querySelector<HTMLInputElement>("#palette-search")!);
+  }
+  const searchField = app.querySelector<HTMLInputElement>("#palette-search")!;
+  const search = searchField.parentElement!;
+  search.hidden = editing;
+  search.classList.toggle("is-searching", searching);
+  searchField.tabIndex = searching ? 0 : -1;
+  if (searchField.value !== searchQuery) searchField.value = searchQuery;
+  if (selectedResult) {
+    const breadcrumb = app.querySelector<HTMLElement>(".search-breadcrumb")!;
+    breadcrumb.textContent = shortcutBreadcrumb(selectedResult);
+    breadcrumb.title = breadcrumb.textContent;
+  }
 
   const segments = document.querySelector<SVGGElement>(".ring-segments")!;
   const childSegments = document.querySelector<SVGGElement>(".child-segments")!;
@@ -929,16 +1061,17 @@ function render(animateOpening = false) {
 
   roots.forEach((item, index) => {
     const [start, end, middle] = segmentAngles(index, roots.length);
+    const entering = animateOpening || (previousAngles && !previousAngles.has(item.id));
     appendTile(item, 0, start, end, middle, appearance.innerRadius, OUTER, segments, layer,
-      animate ? { index, count: roots.length } : undefined);
+      entering ? { index, count: roots.length } : undefined, selectedResult?.id === item.id);
   });
-  if (animate && !roots.length) {
+  if ((animateOpening || previousAngles?.size) && !roots.length) {
     app.querySelector(".ring-empty")?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 145, easing: "ease-out" });
   }
-  if (activeSubmenus[0]) renderChildRing(activeSubmenus[0], 1, childSegments, layer, false);
-  if (activeSubmenus[1]) renderChildRing(activeSubmenus[1], 2, childSegments, layer, false);
+  if (!searching && activeSubmenus[0]) renderChildRing(activeSubmenus[0], 1, childSegments, layer, false);
+  if (!searching && activeSubmenus[1]) renderChildRing(activeSubmenus[1], 2, childSegments, layer, false);
 
-  if (focused) {
+  if (!searching && focused) {
     const title = app.querySelector<HTMLElement>(".focus-title")!;
     title.textContent = focused.name || "Submenu";
     title.title = title.textContent;
@@ -949,13 +1082,26 @@ function render(animateOpening = false) {
     try {
       await invoke("set_edit_window_visible", { visible: nextEditing });
       editing = nextEditing;
+      if (editing) resetPaletteSearch();
       if (!editing) resetEditSelection();
       render();
     } catch (error) {
       showToast(String(error), true);
     }
   });
-  updateDropIndicator(false);
+  if (previousAngles) {
+    const from = roots.map((item, index): [number, number] => {
+      const target = targetAngles[index];
+      const previous = previousAngles.get(item.id);
+      if (!previous) return target;
+      const oldMiddle = (previous[0] + previous[1]) / 2;
+      const offset = angleNear(oldMiddle, (target[0] + target[1]) / 2) - oldMiddle;
+      return [previous[0] + offset, previous[1] + offset];
+    });
+    layoutRootTiles(targetAngles, from);
+  } else {
+    updateDropIndicator(false);
+  }
   updateChildDropIndicator(1, false);
   updateChildDropIndicator(2, false);
 }
@@ -1009,6 +1155,8 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean) {
     return;
   }
   if (item.kind === "submenu") {
+    rememberShortcut(item.id);
+    resetPaletteSearch();
     focusedSubmenuId = item.id;
     activeSubmenus = [];
     render();
@@ -1021,6 +1169,7 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean) {
     activeSubmenus = [];
     render();
     await invoke("open_shortcut", { id: item.id, inTerminal: item.kind === "folder" && shiftKey });
+    rememberShortcut(item.id);
   } catch (error) {
     try {
       await invoke("present_palette");
@@ -1104,11 +1253,37 @@ function editableKind(kind: Shortcut["kind"]): EditableTileKind {
   return tileDefinitions.find((definition) => definition.kind === kind)?.kind ?? "file";
 }
 
+const settingsIconPaths = {
+  tiles: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z",
+  "edit-tile": "m13.5 6.5 4 4M4 20l4.5-1 11-11a2.8 2.8 0 0 0-4-4l-11 11L4 20z",
+  appearance: "M3 6h5m4 0h9M3 12h9m4 0h5M3 18h3m4 0h11M8 4v4m8 2v4M6 16v4",
+  theme: "M12 3a9 9 0 1 0 0 18h1.5a1.5 1.5 0 0 0 1.1-2.5 1.5 1.5 0 0 1 1.1-2.5H18a3 3 0 0 0 3-3c0-5.5-4-10-9-10zM7.5 12h.01m2-4h.01m4-.5h.01m3.5 3h.01",
+  misc: "M9 7v10a2 2 0 1 1-2-2h10a2 2 0 1 1-2 2V7a2 2 0 1 1 2 2H7a2 2 0 1 1 2-2z",
+  submenu: "m6 6 6 6-6 6m6-12 6 6-6 6",
+  text: "M4 6h16M4 10h12M4 14h16M4 18h12",
+  folder: "M3 6a2 2 0 0 1 2-2h4l3 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+  webpage: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3a13 13 0 0 0 0 18 13 13 0 0 0 0-18z",
+  app: "M3 5h18v14H3zM3 9h18m-14-2h.01m3 0h.01",
+  selection: "m4 3 6 17 3-7 7-3L4 3z",
+  grip: "M9 5h.01m6 0h.01M9 12h.01m6 0h.01M9 19h.01m6 0h.01",
+};
+
+function settingsIcon(name: keyof typeof settingsIconPaths) {
+  return `<svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${settingsIconPaths[name]}"/></svg>`;
+}
+
+function settingsHeading(title: string, description: string) {
+  return `<header class="settings-heading"><h1>${title}</h1><p>${description}</p></header>`;
+}
+
 function selectedTileForm(selection: TileSelection) {
   const types = [...tileDefinitions, { kind: "file", label: "File" }];
   return `
+    <div class="tile-selection-summary">
+      <span class="tile-source-icon">${settingsIcon("selection")}</span>
+      <span class="tile-source-copy"><strong data-selection-name></strong><small data-selection-kind></small></span>
+    </div>
     <form id="tile-edit-form" class="tile-form tile-edit-form" aria-label="Selected tile">
-      <h2>Selected tile</h2>
       <label for="edit-tile-kind">Type</label>
       <select id="edit-tile-kind" name="kind">
         ${types.filter(({ kind }) => kind !== "submenu" || selection.level < 2).map(({ kind, label }) => `<option value="${kind}">${label}</option>`).join("")}
@@ -1129,9 +1304,12 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
   const save = form.querySelector<HTMLButtonElement>(".tile-save")!;
   const { item } = selection;
   let kind = editableKind(item.kind);
+  app.querySelector<HTMLElement>("[data-selection-name]")!.textContent = item.name || tileDefinitions.find((tile) => tile.kind === kind)?.label || "File";
+  const selectionKind = app.querySelector<HTMLElement>("[data-selection-kind]")!;
   const values = new Map<EditableTileKind, string>([[kind, kind === "text" ? item.text ?? "" : item.path]]);
   let value: HTMLInputElement | HTMLTextAreaElement | null;
   const renderFields = () => {
+    selectionKind.textContent = type.selectedOptions[0]?.textContent ?? "";
     name.placeholder = kind === "app" ? "Leave blank for icon only" : "Optional name";
     fields.innerHTML = tileValueFields(kind, "edit-tile-value");
     value = bindTileValueFields(form, fields, kind, false);
@@ -1175,73 +1353,80 @@ function displayHotkey(combination: string) {
 }
 
 function renderEditor() {
+  const tabs = [["tiles", "Tiles"], ["edit-tile", "Edit tile"], ["appearance", "Appearance"], ["theme", "Theme"], ["misc", "Behavior"]] as const;
   app.innerHTML = `
     <section class="settings" aria-label="Palette settings">
-      <header class="settings-header">
-        <h1>Palette settings</h1>
-        <p>Add shortcuts and adjust the floating palette.</p>
-      </header>
       <div class="settings-tabs" role="tablist" aria-label="Settings sections">
-        <button class="settings-tab ${editorTab === "tiles" ? "active" : ""}" data-tab="tiles" type="button" role="tab" aria-selected="${editorTab === "tiles"}" aria-controls="tiles-panel">Tiles</button>
-        <button class="settings-tab ${editorTab === "edit-tile" ? "active" : ""}" data-tab="edit-tile" type="button" role="tab" aria-selected="${editorTab === "edit-tile"}" aria-controls="edit-tile-panel">Edit Tile</button>
-        <button class="settings-tab ${editorTab === "appearance" ? "active" : ""}" data-tab="appearance" type="button" role="tab" aria-selected="${editorTab === "appearance"}" aria-controls="appearance-panel">Appearance</button>
-        <button class="settings-tab ${editorTab === "theme" ? "active" : ""}" data-tab="theme" type="button" role="tab" aria-selected="${editorTab === "theme"}" aria-controls="theme-panel">Theme</button>
-        <button class="settings-tab ${editorTab === "misc" ? "active" : ""}" data-tab="misc" type="button" role="tab" aria-selected="${editorTab === "misc"}" aria-controls="misc-panel">Misc</button>
+        ${tabs.map(([id, label]) => `<button class="settings-tab" data-tab="${id}" type="button" role="tab" aria-selected="${editorTab === id}" aria-controls="${id}-panel" tabindex="${editorTab === id ? 0 : -1}">${settingsIcon(id)}${label}</button>`).join("")}
       </div>
+      <div class="settings-content">
       ${editorTab === "tiles" ? `<div class="tiles-panel" id="tiles-panel" role="tabpanel" aria-label="Tiles">
-        <p class="tiles-instruction">Drag a tile onto the palette, or click a tile type to add it at the end.</p>
+        ${settingsHeading("Tiles", "Drag a tile onto the palette or click to add it at the end.")}
         <div class="tile-sources">${tileDefinitions.map(({ kind, label, detail }) => `
           <button class="tile-source" type="button" draggable="true" data-kind="${kind}" aria-label="Add ${label}">
-            <span class="tile-source-icon">${icon(kind)}</span>
+            <span class="tile-source-icon">${settingsIcon(kind)}</span>
             <span class="tile-source-copy"><strong>${label}</strong><small>${detail}</small></span>
-            <span class="tile-source-grip" aria-hidden="true">⋮⋮</span>
+            <span class="tile-source-grip">${settingsIcon("grip")}</span>
           </button>
         `).join("")}</div>
-      </div>` : editorTab === "edit-tile" ? `<div id="edit-tile-panel" role="tabpanel" aria-label="Edit Tile">
-        ${selectedTile ? selectedTileForm(selectedTile) : '<p class="tiles-instruction">Select a tile on the palette to edit it.</p>'}
+      </div>` : editorTab === "edit-tile" ? `<div id="edit-tile-panel" role="tabpanel" aria-label="Edit tile">
+        ${settingsHeading("Edit tile", selectedTile ? "Manage the tile selected on your palette." : "Select a tile on the palette to edit it.")}
+        ${selectedTile ? selectedTileForm(selectedTile) : ""}
       </div>` : editorTab === "appearance" ? `<div class="appearance-panel" id="appearance-panel" role="tabpanel" aria-label="Appearance">
-        ${sliderDefinitions.map(({ key, label, min, max, unit }) => `
-          <div class="setting-row">
-            <label for="setting-${key}">${label} <span class="setting-value" data-value="${key}">(${appearance[key]}${unit ?? ""})</span></label>
-            <input id="setting-${key}" data-key="${key}" type="range" min="${min}" max="${max}" value="${appearance[key]}" />
-          </div>
-        `).join("")}
-        <p class="setting-note">Submenu padding adjusts the space between rings.</p>
+        ${settingsHeading("Appearance", "Adjust the shape and spacing of your palette.")}
+        ${["Geometry", "Spacing"].map((group) => `
+          <h2 class="settings-group-heading">${group}</h2>
+          <div class="settings-range-grid">
+            ${sliderDefinitions.filter((definition) => definition.group === group).map(({ key, label, min, max }) => `
+              <div class="setting-range">
+                <label for="setting-${key}">${label}</label>
+                <span class="setting-value" data-value="${key}">${appearance[key]} px</span>
+                <input id="setting-${key}" data-key="${key}" type="range" min="${min}" max="${max}" value="${appearance[key]}" />
+              </div>`).join("")}
+          </div>`).join("")}
       </div>` : editorTab === "theme" ? `<div class="theme-panel" id="theme-panel" role="tabpanel" aria-label="Theme">
+        ${settingsHeading("Theme", "Choose a color mode and customize the palette.")}
         <div class="setting-row">
           <label for="theme-mode">Mode</label>
           <select id="theme-mode">
+            <option value="system">System</option>
             <option value="light">Light</option>
             <option value="dark">Dark</option>
-            <option value="system">System</option>
           </select>
         </div>
         ${themeColors.map(({ key, label }) => `
           <div class="setting-row">
             <label for="theme-${key}">${label}</label>
-            <input id="theme-${key}" type="color" />
+            <span class="setting-color">
+              <span class="setting-value" data-theme-value="${key}" aria-hidden="true"></span>
+              <input id="theme-${key}" type="color" />
+            </span>
           </div>
         `).join("")}
-      </div>` : `<div id="misc-panel" role="tabpanel" aria-label="Misc">
+      </div>` : `<div id="misc-panel" role="tabpanel" aria-label="Behavior">
+        ${settingsHeading("Behavior", "Control how the palette opens and moves.")}
+        <h2 class="settings-group-heading">Shortcut</h2>
         <div class="setting-row">
-          <label for="palette-hotkey">Open palette hotkey</label>
+          <label for="palette-hotkey">Open palette</label>
           <input id="palette-hotkey" type="text" readonly placeholder="Press a shortcut" aria-describedby="hotkey-note" />
         </div>
-        <p class="setting-note hotkey-note" id="hotkey-note">Press a key combination, or hold a modifier and click this field.</p>
-        <div class="setting-row">
-          <label for="palette-animations">Enable animations</label>
-          <input id="palette-animations" type="checkbox" ${appearance.animations ? "checked" : ""} />
-        </div>
-        <div class="setting-row">
-          <label for="palette-screen-center">Open at screen center</label>
-          <input id="palette-screen-center" type="checkbox" ${appearance.openAtScreenCenter ? "checked" : ""} />
-        </div>
-        <div class="setting-row">
-          <label for="palette-cast-shadow">Cast shadow</label>
-          <input id="palette-cast-shadow" type="checkbox" ${appearance.castShadow ? "checked" : ""} />
-        </div>
+        <p class="setting-note" id="hotkey-note">Select the shortcut, then press a key combination or use a modifier with a mouse button.</p>
+        <h2 class="settings-group-heading">Window</h2>
+        <label class="setting-row">
+          <span>Enable animations</span>
+          <input id="palette-animations" class="setting-switch" type="checkbox" role="switch" ${appearance.animations ? "checked" : ""} />
+        </label>
+        <label class="setting-row">
+          <span>Open at screen center</span>
+          <input id="palette-screen-center" class="setting-switch" type="checkbox" role="switch" ${appearance.openAtScreenCenter ? "checked" : ""} />
+        </label>
+        <label class="setting-row">
+          <span>Cast shadow</span>
+          <input id="palette-cast-shadow" class="setting-switch" type="checkbox" role="switch" ${appearance.castShadow ? "checked" : ""} />
+        </label>
       </div>`}
       <div class="settings-status" role="status" aria-live="polite"></div>
+      </div>
     </section>
     ${tileForm ? `<div class="form-backdrop">
       <form id="tile-create-form" class="tile-form" aria-label="Add ${tileForm.kind} tile">
@@ -1334,11 +1519,25 @@ function renderEditor() {
     }
   }
 
-  app.querySelectorAll<HTMLButtonElement>(".settings-tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      editorTab = tab.dataset.tab as EditorTab;
-      renderEditor();
-      app.scrollTop = 0;
+  const selectTab = (id: EditorTab) => {
+    editorTab = id;
+    renderEditor();
+    app.scrollTop = 0;
+    app.querySelector<HTMLButtonElement>(`[data-tab="${id}"]`)?.focus({ preventScroll: true });
+  };
+  app.querySelectorAll<HTMLButtonElement>(".settings-tab").forEach((tab, index) => {
+    tab.addEventListener("click", () => selectTab(tabs[index][0]));
+    tab.addEventListener("keydown", (event) => {
+      let next: number;
+      switch (event.key) {
+        case "ArrowLeft": next = (index + tabs.length - 1) % tabs.length; break;
+        case "ArrowRight": next = (index + 1) % tabs.length; break;
+        case "Home": next = 0; break;
+        case "End": next = tabs.length - 1; break;
+        default: return;
+      }
+      event.preventDefault();
+      selectTab(tabs[next][0]);
     });
   });
 
@@ -1377,7 +1576,7 @@ function renderEditor() {
     const update = () => {
       const value = Number(input.value);
       appearance[definition.key] = value;
-      app.querySelector<HTMLElement>(`[data-value="${definition.key}"]`)!.textContent = `(${value}${definition.unit ?? ""})`;
+      app.querySelector<HTMLElement>(`[data-value="${definition.key}"]`)!.textContent = `${value} px`;
       input.style.setProperty("--progress", `${(value - definition.min) / (definition.max - definition.min) * 100}%`);
       previewAppearance();
       scheduleAppearanceSave();
@@ -1482,8 +1681,9 @@ async function openPalette() {
   if (openingPalette) return;
   openingPalette = true;
   try {
+    resetPaletteSearch();
     activeSubmenus = [];
-    render(true);
+    render("opening");
     const entrance = app.getAnimations({ subtree: true });
     for (const animation of entrance) {
       animation.pause();
@@ -1492,6 +1692,7 @@ async function openPalette() {
     // Resolve the entrance styles before making the native window visible.
     app.getBoundingClientRect();
     await invoke("present_palette");
+    app.querySelector<HTMLInputElement>("#palette-search")?.focus({ preventScroll: true });
     for (const animation of entrance) animation.play();
   } finally {
     openingPalette = false;
@@ -1507,7 +1708,8 @@ async function start() {
     await listen<TileKind>("tile-drag-start", (event) => {
       incomingTileKind = event.payload;
       tileDropHandled = false;
-      if (dragging) {
+      if (dragging || searchQuery) {
+        resetPaletteSearch();
         dragging = false;
         render();
       }
@@ -1572,7 +1774,7 @@ async function start() {
     app.addEventListener("pointerup", (event) => {
       if (editing || tileReorder || incomingTileKind || externalDragging || suppressTileClick) return;
       const target = event.target as Element;
-      if (!target.closest(".shortcut, .segment, .edit-button, .focus-controls, .ring-empty, .submenu-empty-slot, .empty-prompt")) {
+      if (!target.closest(".shortcut, .segment, .edit-button, .focus-controls, .palette-search, .search-summary, .ring-empty, .submenu-empty-slot, .empty-prompt")) {
         void invoke("dismiss_palette");
       }
     });
@@ -1588,7 +1790,7 @@ async function start() {
       if (tileReorder?.pointerId != null) cancelTileReorder();
     });
     document.addEventListener("pointerleave", () => {
-      if (!tileReorder && !incomingTileKind && activeSubmenus.length && !(editing && selectedTileId)) {
+      if (!searchQuery.trim() && !tileReorder && !incomingTileKind && activeSubmenus.length && !(editing && selectedTileId)) {
         activeSubmenus = [];
         refreshSubmenus(1);
       }
@@ -1617,6 +1819,10 @@ async function start() {
           externalDragging = true;
           incomingTileKind = "folder";
           tileDropHandled = false;
+          if (searchQuery) {
+            resetPaletteSearch();
+            render();
+          }
         }
         if (incomingTileKind) previewDropAt(event.payload.position.x / window.devicePixelRatio, event.payload.position.y / window.devicePixelRatio);
       } else if (event.payload.type === "leave") {
@@ -1646,7 +1852,15 @@ async function start() {
 }
 
 document.addEventListener("keydown", (event) => {
+  if (event.isComposing) return;
   if (event.key === "Escape") {
+    if (searchQuery) {
+      event.preventDefault();
+      resetPaletteSearch();
+      render("search");
+      app.querySelector<HTMLInputElement>("#palette-search")?.focus({ preventScroll: true });
+      return;
+    }
     if (tileReorder?.started) {
       cancelTileReorder();
       return;
@@ -1664,6 +1878,15 @@ document.addEventListener("keydown", (event) => {
     } else {
       void getCurrentWindow().close();
     }
+  } else if (!isEditorWindow && !editing && !busy && !incomingTileKind && !event.defaultPrevented
+    && !event.ctrlKey && !event.altKey && !event.metaKey && event.key !== " " && Array.from(event.key).length === 1) {
+    const field = app.querySelector<HTMLInputElement>("#palette-search");
+    if (!field || document.activeElement === field) return;
+    event.preventDefault();
+    field.value += event.key;
+    field.dispatchEvent(new Event("input"));
+    field.focus({ preventScroll: true });
+    field.setSelectionRange(field.value.length, field.value.length);
   }
 });
 
