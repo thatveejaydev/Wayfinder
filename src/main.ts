@@ -111,7 +111,7 @@ const CENTER = 310;
 const OUTER = 231;
 const COLOR_LABEL_STROKE_WIDTH = 6;
 const MAX_ITEMS = 12;
-const SUBMENU_TILE_SPAN = 270 / MAX_ITEMS;
+const MIN_SUBMENU_SPAN = 54;
 const RECENT_SHORTCUTS_KEY = "wayfinder.recent-shortcuts";
 const MAX_RECENT_SHORTCUTS = 100;
 
@@ -446,9 +446,12 @@ function segmentAngles(index: number, count: number): [number, number, number] {
   return [start, start + span, start + span / 2];
 }
 
-function fanAngles(center: number, index: number, count: number): [number, number, number] {
-  const start = center + (index - count / 2) * SUBMENU_TILE_SPAN;
-  return [start, start + SUBMENU_TILE_SPAN, start + SUBMENU_TILE_SPAN / 2];
+function fanAngles(level: number, center: number, index: number, count: number): [number, number, number] {
+  const maxSpan = level === 2 ? 180 : 270;
+  const span = MIN_SUBMENU_SPAN + (maxSpan - MIN_SUBMENU_SPAN) * (count - 1) / (MAX_ITEMS - 1);
+  const width = span / count;
+  const start = center - span / 2 + index * width;
+  return [start, start + width, start + width / 2];
 }
 
 function angleNear(angle: number, center: number): number {
@@ -469,7 +472,7 @@ function menuCenter(parentId: string): number | null {
   if (parentCenter === null) return null;
   const siblings = childrenOf(parent.parentId);
   const index = siblings.findIndex((item) => item.id === parentId);
-  return index >= 0 ? fanAngles(parentCenter, index, siblings.length)[2] : null;
+  return index >= 0 ? fanAngles(1, parentCenter, index, siblings.length)[2] : null;
 }
 
 function openSubmenu(item: Shortcut, level: number) {
@@ -527,14 +530,14 @@ function insertionIndex(clientX: number, clientY: number): number | null {
 
 type DropTarget = { parentId: string | null; index: number };
 
-function fanInsertionIndex(center: number, count: number, angle: number): number | null {
+function fanInsertionIndex(level: number, center: number, count: number, angle: number): number | null {
   if (count >= MAX_ITEMS) return null;
   const slots = count + 1;
   const near = angleNear(angle, center);
-  const [start] = fanAngles(center, 0, slots);
-  const [, end] = fanAngles(center, slots - 1, slots);
+  const [start, firstEnd] = fanAngles(level, center, 0, slots);
+  const [, end] = fanAngles(level, center, slots - 1, slots);
   if (near < start - 9 || near > end + 9) return null;
-  return Math.max(0, Math.min(slots - 1, Math.floor((near - start) / SUBMENU_TILE_SPAN)));
+  return Math.max(0, Math.min(slots - 1, Math.floor((near - start) / (firstEnd - start))));
 }
 
 function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = incomingTileKind): DropTarget | null {
@@ -555,7 +558,7 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
     const deepest = level === 2 || focusedSubmenuId !== null;
     if (!deepest && items.length) {
       const hovered = items.find((_, index) => {
-        const [start, end] = fanAngles(center, index, items.length);
+        const [start, end] = fanAngles(level, center, index, items.length);
         const near = angleNear(angle, center);
         return near >= start && near <= end;
       });
@@ -567,7 +570,7 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
       }
     }
     if (deepest && kind === "submenu") return null;
-    const index = fanInsertionIndex(center, items.length, angle);
+    const index = fanInsertionIndex(level, center, items.length, angle);
     return index === null ? null : { parentId, index };
   }
 
@@ -677,7 +680,7 @@ function updateChildDropIndicator(level: 1 | 2, animate = true) {
     const slot = reorder && reorder.target !== null
       ? reorderSlot(index, reorder.from, reorder.target)
       : index + (active && index >= incomingIndex! ? 1 : 0);
-    const [start, end] = fanAngles(center, slot, count);
+    const [start, end] = fanAngles(level, center, slot, count);
     return [start, end];
   });
   const paths = Array.from(app.querySelectorAll<SVGGElement>(`.child-segments .segment[data-level="${level}"]`));
@@ -685,7 +688,7 @@ function updateChildDropIndicator(level: 1 | 2, animate = true) {
   const emptySlot = app.querySelector<SVGPathElement>(`.submenu-empty-slot[data-level="${level}"]`);
   if (emptySlot) emptySlot.style.display = active ? "none" : "";
   if (previewIndex !== null) {
-    const [start, end] = fanAngles(center, previewIndex, count);
+    const [start, end] = fanAngles(level, center, previewIndex, count);
     placeholder.setAttribute("d", ringSegmentPath(start, end, ring.inner, ring.outer));
     placeholder.classList.add("visible");
   } else {
@@ -779,7 +782,7 @@ function prepareTileReorder(event: PointerEvent, item: Shortcut, level: TileReor
     target: null,
     count: siblings.length,
     ring: level === 0 ? { inner: appearance.innerRadius, outer: OUTER } : submenuRadii()[level - 1],
-    angles: (index) => level === 0 ? segmentAngles(index, siblings.length) : fanAngles(center, index, siblings.length),
+    angles: (index) => level === 0 ? segmentAngles(index, siblings.length) : fanAngles(level, center, index, siblings.length),
     path,
     button,
   };
@@ -1016,16 +1019,16 @@ function renderChildRing(parentId: string, level: 1 | 2, segments: SVGGElement, 
   const items = childrenOf(parentId);
   const ring = submenuRadii()[level - 1];
   displayedChildAngles[level] = items.map((_, index) => {
-    const [start, end] = fanAngles(center, index, items.length);
+    const [start, end] = fanAngles(level, center, index, items.length);
     return [start, end];
   });
   items.forEach((item, index) => {
-    const [start, end, middle] = fanAngles(center, index, items.length);
+    const [start, end, middle] = fanAngles(level, center, index, items.length);
     appendTile(item, level, start, end, middle, ring.inner, ring.outer, segments, layer,
       animate ? { index, count: items.length } : undefined);
   });
   if (editing && items.length === 0) {
-    const [start, end] = fanAngles(center, 0, 1);
+    const [start, end] = fanAngles(level, center, 0, 1);
     const path = document.createElementNS(SVG_NS, "path");
     path.setAttribute("d", ringSegmentPath(start, end, ring.inner, ring.outer));
     path.setAttribute("class", "submenu-empty-slot");
