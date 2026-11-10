@@ -871,9 +871,14 @@ fn open_tile_form(
     kind: String,
     index: usize,
     parent_id: Option<String>,
+    draft_id: String,
 ) -> Result<(), String> {
-    app.emit_to("editor", "tile-form-requested", (kind, index, parent_id, workspace_id))
-        .map_err(|e| e.to_string())?;
+    app.emit_to(
+        "editor",
+        "tile-form-requested",
+        (kind, index, parent_id, workspace_id, draft_id),
+    )
+    .map_err(|e| e.to_string())?;
     if let Some(editor) = app.get_webview_window("editor") {
         let _ = editor.set_focus();
     }
@@ -1391,6 +1396,7 @@ fn dismiss_palette(app: AppHandle) {
         let _ = editor.hide();
     }
     let _ = app.emit_to("main", "editor-closed", ());
+    let _ = app.emit_to("editor", "editor-closed", ());
 }
 
 #[cfg(target_os = "windows")]
@@ -1486,6 +1492,7 @@ pub fn run() {
                     api.prevent_close();
                     let _ = window.hide();
                     let _ = window.app_handle().emit_to("main", "editor-closed", ());
+                    let _ = window.app_handle().emit_to("editor", "editor-closed", ());
                 }
             }
             #[cfg(target_os = "windows")]

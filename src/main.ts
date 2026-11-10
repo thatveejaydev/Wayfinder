@@ -21,6 +21,8 @@ type Shortcut = {
 
 type TileKind = "submenu" | "text" | "folder" | "webpage" | "app";
 type EditableTileKind = TileKind | "file";
+type TileForm = { kind: TileKind; index: number; parentId: string | null; workspaceId: string; draftId?: string };
+type TileDraft = { id: string; index: number; item: Shortcut };
 // Tailwind CSS 4.3.0 default theme colors, stored by token name in new tiles.
 const tailwindColors: Record<string, string> = tailwindColorTokens;
 const tailwindColorGroups = new Map<string, string[]>();
@@ -164,7 +166,8 @@ let saveQueue = Promise.resolve();
 let editorTab: EditorTab = "tiles";
 let paletteHotkey: string | null = null;
 let savingHotkey = false;
-let tileForm: { kind: TileKind; index: number; parentId: string | null; workspaceId: string } | null = null;
+let tileForm: TileForm | null = null;
+let tileDraft: TileDraft | null = null;
 let selectedTileId: string | null = null;
 let selectedTile: TileSelection | null = null;
 let tileReorder: TileReorder | null = null;
@@ -305,6 +308,14 @@ function loadShortcutIcon(item: Shortcut, container: HTMLElement, workspaceId: s
 
 function childrenOf(parentId: string | null): Shortcut[] {
   return shortcuts.filter((item) => (item.parentId ?? null) === parentId);
+}
+
+function visibleChildrenOf(parentId: string | null): Shortcut[] {
+  const items = childrenOf(parentId);
+  if (tileDraft?.item.parentId === parentId && items.length < MAX_ITEMS) {
+    items.splice(tileDraft.index, 0, tileDraft.item);
+  }
+  return items;
 }
 
 function shortcutName(item: Pick<Shortcut, "kind" | "name" | "path" | "text" | "emoji">): string {
@@ -602,8 +613,15 @@ function fanInsertionIndex(level: number, center: number, count: number, angle: 
   return Math.max(0, Math.min(slots - 1, Math.floor((near - start) / (firstEnd - start))));
 }
 
+function submenuEdgeIndex(index: number, angle: number, [start, end, middle]: [number, number, number]): number | null {
+  const offset = angleNear(angle, middle) - middle;
+  // Reserve the middle half of the tile for dropping inside the submenu.
+  if (Math.abs(offset) < (end - start) / 4) return null;
+  return offset < 0 ? index : index + 1;
+}
+
 function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = incomingTileKind): DropTarget | null {
-  if (searchQuery.trim()) return null;
+  if (tileDraft || searchQuery.trim()) return null;
   const position = palettePosition(clientX, clientY);
   if (!position) return null;
   const { radius, angle } = position;
@@ -619,12 +637,15 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
     const items = childrenOf(parentId);
     const deepest = level === 2 || focusedSubmenuId !== null;
     if (!deepest && items.length) {
-      const hovered = items.find((_, index) => {
+      const hoveredIndex = items.findIndex((_, index) => {
         const [start, end] = fanAngles(level, center, index, items.length);
         const near = angleNear(angle, center);
         return near >= start && near <= end;
       });
+      const hovered = items[hoveredIndex];
       if (hovered?.kind === "submenu") {
+        const edgeIndex = submenuEdgeIndex(hoveredIndex, angle, fanAngles(level, center, hoveredIndex, items.length));
+        if (edgeIndex !== null && items.length < MAX_ITEMS) return { parentId, index: edgeIndex };
         openSubmenu(hovered, level);
         const children = childrenOf(hovered.id);
         if (kind === "submenu" || children.length >= MAX_ITEMS) return null;
@@ -649,6 +670,8 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
     const hoveredIndex = ((Math.round((angle + 90) / rootSpan) % roots.length) + roots.length) % roots.length;
     const hovered = roots[hoveredIndex];
     if (hovered.kind === "submenu") {
+      const edgeIndex = submenuEdgeIndex(hoveredIndex, angle, segmentAngles(hoveredIndex, roots.length));
+      if (edgeIndex !== null && roots.length < MAX_ITEMS) return { parentId: null, index: edgeIndex };
       openSubmenu(hovered, 0);
       const children = childrenOf(hovered.id);
       if (children.length >= MAX_ITEMS) return null;
@@ -670,7 +693,7 @@ function updateDropIndicator(animate = true) {
   if (searchQuery.trim()) return;
   const placeholder = app.querySelector<SVGPathElement>(".root-drop-indicator");
   if (!placeholder) return;
-  const roots = childrenOf(focusedSubmenuId);
+  const roots = visibleChildrenOf(focusedSubmenuId);
   const active = incomingTileKind !== null && incomingParentId === focusedSubmenuId && incomingIndex !== null && roots.length < MAX_ITEMS;
   const reorder = tileReorder?.level === 0 ? tileReorder : null;
   const previewIndex = reorder?.target ?? (active ? incomingIndex : null);
@@ -732,7 +755,7 @@ function updateChildDropIndicator(level: 1 | 2, animate = true) {
   const center = menuCenter(parentId);
   const placeholder = app.querySelector<SVGPathElement>(`.child-drop-indicator[data-level="${level}"]`);
   if (center === null || !placeholder) return;
-  const items = childrenOf(parentId);
+  const items = visibleChildrenOf(parentId);
   const ring = submenuRadii()[level - 1];
   const active = incomingTileKind !== null && incomingParentId === parentId && incomingIndex !== null && items.length < MAX_ITEMS;
   const reorder = tileReorder?.level === level ? tileReorder : null;
@@ -931,22 +954,54 @@ async function finishTileReorder(event: PointerEvent) {
 }
 
 async function finishTileDrop(kind: TileKind, target: DropTarget, workspaceId: string | null) {
-  if (tileDropHandled || workspaceId !== workspaceList.activeId) return;
+  if (tileDraft || tileDropHandled || workspaceId !== workspaceList.activeId) return;
   tileDropHandled = true;
   incomingTileKind = null;
   incomingIndex = null;
   incomingParentId = null;
-  render();
-  if (busy) return;
+  if (busy) {
+    render();
+    return;
+  }
   if (childrenOf(target.parentId).length >= MAX_ITEMS) {
+    render();
     showToast(`This ring is full (${MAX_ITEMS} items)`, true);
     return;
   }
+  const draftId = crypto.randomUUID();
+  const form = { kind, index: target.index, parentId: target.parentId, workspaceId, draftId };
+  tileDraft = makeTileDraft(form, draftId, "", "", null);
+  render();
   try {
-    await invoke("open_tile_form", { kind, index: target.index, parentId: target.parentId, workspaceId });
+    await invoke("open_tile_form", form);
   } catch (error) {
+    if (tileDraft?.id === draftId) {
+      tileDraft = null;
+      render();
+    }
     showToast(String(error), true);
   }
+}
+
+function makeTileDraft(form: TileForm, draftId: string, name: string, value: string, color: string | null): TileDraft {
+  const { kind, index, parentId } = form;
+  const trimmed = value.trim();
+  const path = kind === "webpage" && trimmed && !trimmed.includes("://") ? `https://${trimmed}` : trimmed;
+  return {
+    id: draftId,
+    index,
+    item: {
+      id: draftId,
+      kind,
+      name: name.trim(),
+      path: kind === "text" || kind === "submenu" ? "" : path,
+      text: kind === "text" ? value : null,
+      emoji: kind === "submenu" ? trimmed : null,
+      preview: null,
+      parentId,
+      color,
+    },
+  };
 }
 
 type CachedTileEntry = {
@@ -981,6 +1036,7 @@ function appendTile(
   previewWorkspaceId?: string,
   result?: SearchResult,
 ) {
+  const draft = item === tileDraft?.item;
   const searching = result !== undefined;
   const workspaceId = result?.workspace.id ?? previewWorkspaceId ?? workspaceList.activeId;
   const activeSubmenu = !previewWorkspaceId && !searching && activeSubmenus.includes(item.id);
@@ -993,7 +1049,7 @@ function appendTile(
   const poolKey = searchKey ?? `${level}:${item.id}`;
   const signature = `${item.kind}\0${item.name}\0${item.path}\0${item.text ?? ""}\0${item.color ?? ""}\0${item.emoji ?? ""}\0${item.preview ?? ""}\0${editing ? 1 : 0}\0${searching ? 1 : 0}`;
 
-  const entry = previewWorkspaceId ? undefined : tileElementPool.get(poolKey);
+  const entry = draft || previewWorkspaceId ? undefined : tileElementPool.get(poolKey);
   if (entry && entry.signature === signature) {
     entry.item = item;
     entry.level = level;
@@ -1041,6 +1097,7 @@ function appendTile(
   }
   positionSegment(path, start, end, innerRadius, outerRadius);
   path.setAttribute("class", "segment");
+  path.classList.toggle("draft-segment", draft);
   path.dataset.level = String(level);
   path.classList.toggle("active-submenu", activeSubmenu);
   path.dataset.id = item.id;
@@ -1073,19 +1130,28 @@ function appendTile(
       : icon(item.kind);
     tileIcon = `<span class="shortcut-icon ${item.kind}">${thumbnail}</span>`;
   }
-  const removeBadge = editing && !searching ? `<span class="remove-badge" title="Remove">
+  const removeBadge = editing && !draft && !searching ? `<span class="remove-badge" title="Remove">
     <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3L3 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
   </span>` : "";
-  button.innerHTML = `${tileIcon}${item.name || item.kind === "text" || searching ? '<span class="shortcut-label"></span>' : ""}${result ? '<span class="shortcut-workspace"></span>' : ""}${removeBadge}`;
+  const draftHasValue = draft && Boolean(item.path || item.emoji || item.text);
+  if (draft && !draftHasValue) tileIcon = "";
+  const showLabel = item.name || (draft ? draftHasValue && !item.emoji : item.kind === "text" || searching);
+  button.innerHTML = `${tileIcon}${showLabel ? '<span class="shortcut-label"></span>' : ""}${result ? '<span class="shortcut-workspace"></span>' : ""}${removeBadge}`;
   if (emoji) button.querySelector<HTMLElement>(".submenu-emoji")!.textContent = emoji;
   if (result) button.querySelector<HTMLElement>(".shortcut-workspace")!.textContent = result.workspace.name;
-  if (!item.preview && (item.kind === "app" || item.kind === "webpage")) {
+  if (!draft && !item.preview && (item.kind === "app" || item.kind === "webpage")) {
     loadShortcutIcon(item, button.querySelector<HTMLElement>(".shortcut-icon")!, workspaceId,
       previewWorkspaceId ? undefined : searchKey ?? item.id);
   }
   const label = button.querySelector<HTMLElement>(".shortcut-label");
   if (label) label.textContent = name;
 
+  if (draft) {
+    button.disabled = true;
+    segments.appendChild(path);
+    layer.appendChild(button);
+    return;
+  }
   const createdEntry: CachedTileEntry = { path, button, signature, item, level };
   if (!previewWorkspaceId) tileElementPool.set(poolKey, createdEntry);
 
@@ -1146,7 +1212,7 @@ function animateTileEntrance(
 function renderChildRing(parentId: string, level: 1 | 2, segments: SVGGElement, layer: HTMLDivElement, animate: boolean) {
   const center = menuCenter(parentId);
   if (center === null) return;
-  const items = childrenOf(parentId);
+  const items = visibleChildrenOf(parentId);
   const ring = submenuRadii()[level - 1];
   displayedChildAngles[level] = items.map((_, index) => {
     const [start, end] = fanAngles(level, center, index, items.length);
@@ -1335,7 +1401,7 @@ function render(transition?: "opening" | "search" | "workspace-preview") {
   const pageStart = Math.floor(selectedIndex / MAX_ITEMS) * MAX_ITEMS;
   const page = matches.slice(pageStart, pageStart + MAX_ITEMS);
   const roots = searching ? page.map(({ item }) => item)
-    : workspacePreview?.roots ?? childrenOf(focused?.id ?? null);
+    : workspacePreview?.roots ?? visibleChildrenOf(focused?.id ?? null);
   window.cancelAnimationFrame(layoutAnimation);
   childLayoutAnimations.forEach((animation) => window.cancelAnimationFrame(animation));
   childLayoutAnimations = [0, 0, 0];
@@ -1353,7 +1419,7 @@ function render(transition?: "opening" | "search" | "workspace-preview") {
   const emptyWidth = OUTER - appearance.innerRadius;
 
   const stage = ensureStageShell();
-  stage.inert = pickerOpen;
+  stage.inert = pickerOpen || tileDraft !== null;
   stage.className = `stage ${dragging ? "is-dragging" : ""} ${editing ? "is-editing" : ""}`;
   const palette = stage.querySelector<HTMLElement>(".palette")!;
   const ringSvg = palette.querySelector<SVGSVGElement>(".ring-svg")!;
@@ -1533,7 +1599,7 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean, worksp
 }
 
 async function addDroppedPaths(paths: string[], target: DropTarget | null, workspaceId: string | null) {
-  if (busy || !paths.length || workspaceId !== workspaceList.activeId) return;
+  if (busy || tileDraft || !paths.length || workspaceId !== workspaceList.activeId) return;
   busy = true;
   dragging = false;
   const parentId = target?.parentId ?? focusedSubmenuId;
@@ -1624,6 +1690,7 @@ function bindTileValueFields(form: HTMLFormElement, fields: HTMLElement, kind: E
         if (!selected) return;
         value.value = selected.path;
         if (fillSuggestedName && !name.value.trim()) name.value = selected.name;
+        value.dispatchEvent(new Event("input"));
       });
     }).catch(() => {
       appSearch.placeholder = "Browse or paste an app path below";
@@ -1683,7 +1750,7 @@ function colorName(token: string) {
   return token[0].toUpperCase() + token.slice(1).replace("-", " ");
 }
 
-function bindTileColor(form: HTMLFormElement, color?: string | null) {
+function bindTileColor(form: HTMLFormElement, color?: string | null, onChange?: () => void) {
   const picker = form.querySelector<HTMLElement>(".tile-color-picker")!;
   const preview = picker.querySelector<HTMLElement>(".tile-color-preview")!;
   const clear = picker.querySelector<HTMLButtonElement>(".tile-color-clear")!;
@@ -1727,6 +1794,7 @@ function bindTileColor(form: HTMLFormElement, color?: string | null) {
       return;
     }
     render();
+    onChange?.();
   });
   render();
   return () => selected;
@@ -2300,23 +2368,35 @@ function renderEditor() {
   if (editForm && selectedTile) bindSelectedTileForm(editForm, selectedTile);
   const form = app.querySelector<HTMLFormElement>("#tile-create-form");
   if (form && tileForm) {
-    const valueField = bindTileValueFields(form, form.querySelector<HTMLElement>(".tile-fields")!, tileForm.kind, true);
+    const current = tileForm;
+    const valueField = bindTileValueFields(form, form.querySelector<HTMLElement>(".tile-fields")!, current.kind, true);
     const nameField = form.querySelector<HTMLInputElement>("#tile-name")!;
-    const selectedColor = bindTileColor(form);
+    const updateDraft = () => {
+      if (!current.draftId || tileForm !== current) return;
+      const draft = makeTileDraft(current, current.draftId, nameField.value, valueField?.value ?? "", selectedColor());
+      void emitTo("main", "tile-draft-updated", draft).catch(() => {});
+    };
+    const selectedColor = bindTileColor(form, null, updateDraft);
+    nameField.addEventListener("input", updateDraft);
+    valueField?.addEventListener("input", updateDraft);
     form.querySelector<HTMLButtonElement>(".tile-cancel")!.addEventListener("click", () => {
+      if (current.draftId) void emitTo("main", "tile-draft-closed", { id: current.draftId }).catch(() => {});
       tileForm = null;
       renderEditor();
     });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const current = tileForm;
-      if (!current) return;
+      if (tileForm !== current) return;
       const save = form.querySelector<HTMLButtonElement>(".tile-save")!;
+      if (save.disabled) return;
       save.disabled = true;
+      const cancel = form.querySelector<HTMLButtonElement>(".tile-cancel")!;
+      cancel.disabled = true;
       const name = nameField.value;
       const value = valueField?.value ?? "";
       try {
         await invoke("create_tile", { kind: current.kind, name, value, index: current.index, parentId: current.parentId, color: selectedColor(), workspaceId: current.workspaceId });
+        if (current.draftId) void emitTo("main", "tile-draft-closed", { id: current.draftId, saved: true }).catch(() => {});
         if (tileForm !== current) return;
         tileForm = null;
         renderEditor();
@@ -2324,6 +2404,7 @@ function renderEditor() {
       } catch (error) {
         form.querySelector<HTMLElement>(".tile-form-error")!.textContent = String(error);
         save.disabled = false;
+        cancel.disabled = false;
       }
     });
     (tileForm.kind === "submenu" ? nameField : valueField ?? nameField).focus();
@@ -2331,10 +2412,10 @@ function renderEditor() {
   observeEditorHeight();
 }
 
-function openTileForm(kind: TileKind, index: number, parentId: string | null, workspaceId: string) {
+function openTileForm(kind: TileKind, index: number, parentId: string | null, workspaceId: string, draftId?: string) {
   if (workspaceId !== workspaceList.activeId) return;
   editorTab = "tiles";
-  tileForm = { kind, index, parentId, workspaceId };
+  tileForm = { kind, index, parentId, workspaceId, draftId };
   renderEditor();
 }
 
@@ -2383,14 +2464,20 @@ async function startEditor() {
       if (payload && payload.workspaceId !== workspaceList.activeId) return;
       if (!payload || selectedTile?.item.id !== payload.item.id || editorTab !== "edit-tile" || tileForm) {
         selectedTile = payload;
+        if (tileForm?.draftId) void emitTo("main", "tile-draft-closed", { id: tileForm.draftId }).catch(() => {});
         tileForm = null;
         if (payload) editorTab = "edit-tile";
         renderEditor();
         if (payload) app.scrollTop = 0;
       }
     });
-    await listen<[TileKind, number, string | null, string]>("tile-form-requested", (event) => {
+    await listen<[TileKind, number, string | null, string, string]>("tile-form-requested", (event) => {
       openTileForm(...event.payload);
+    });
+    await listen("editor-closed", () => {
+      if (!tileForm?.draftId) return;
+      tileForm = null;
+      renderEditor();
     });
     const [initialAppearance, initialHotkey, initialWorkspaces] = await Promise.all([
       invoke<Appearance>("get_appearance"),
@@ -2415,7 +2502,7 @@ async function openPalette() {
   try {
     closeWorkspacePicker();
     resetPaletteSearch();
-    activeSubmenus = [];
+    if (!tileDraft) activeSubmenus = [];
     render("opening");
     const entrance = app.getAnimations({ subtree: true });
     for (const animation of entrance) {
@@ -2440,6 +2527,7 @@ function applyWorkspacePalette(next: WorkspacePalette) {
     if (key.startsWith("search:")) shortcutIcons.delete(key);
   }
   if (switched) {
+    tileDraft = null;
     resetPaletteSearch();
     focusedSubmenuId = null;
     activeSubmenus = [];
@@ -2516,7 +2604,29 @@ async function start() {
       clearDropTarget();
     });
     const refresh = () => void refreshWorkspacePalette().catch((error) => showToast(String(error), true));
-    await listen("shortcuts-changed", refresh);
+    await listen<TileDraft>("tile-draft-updated", ({ payload }) => {
+      if (tileDraft?.id !== payload.id) return;
+      tileDraft = payload;
+      render();
+    });
+    await listen<{ id: string; saved?: boolean }>("tile-draft-closed", async ({ payload }) => {
+      if (tileDraft?.id !== payload.id) return;
+      try {
+        const next = await invoke<WorkspacePalette>("get_workspace_palette");
+        if (tileDraft?.id !== payload.id) return;
+        tileDraft = null;
+        if (next.revision > workspaceList.revision) applyWorkspacePalette(next);
+        else render();
+      } catch (error) {
+        if (tileDraft?.id !== payload.id) return;
+        tileDraft = null;
+        render();
+        if (payload.saved) showToast(String(error), true);
+      }
+    });
+    await listen("shortcuts-changed", () => {
+      if (!tileDraft) refresh();
+    });
     await listen("workspaces-changed", refresh);
     await listen("editor-opened", () => {
       if (editing) return;
@@ -2528,12 +2638,15 @@ async function start() {
       if (app.querySelector(".stage")) render();
     });
     await listen("editor-closed", () => {
+      const hadDraft = tileDraft !== null;
+      if (hadDraft) refresh();
+      tileDraft = null;
       closeWorkspacePicker();
       if (editing) {
         editing = false;
         resetEditSelection();
         render();
-      } else if (searchQuery || activeSubmenus.length) {
+      } else if (hadDraft || searchQuery || activeSubmenus.length) {
         resetPaletteSearch();
         activeSubmenus = [];
         render();
@@ -2599,7 +2712,7 @@ async function start() {
       if (tileReorder?.pointerId != null) cancelTileReorder();
     });
     document.addEventListener("pointerleave", () => {
-      if (!searchQuery.trim() && !tileReorder && !incomingTileKind && activeSubmenus.length && !(editing && selectedTileId)) {
+      if (!tileDraft && !searchQuery.trim() && !tileReorder && !incomingTileKind && activeSubmenus.length && !(editing && selectedTileId)) {
         activeSubmenus = [];
         refreshSubmenus(1);
       }
@@ -2669,7 +2782,7 @@ async function start() {
 document.addEventListener("keydown", (event) => {
   if (event.isComposing) return;
   if (!isEditorWindow && !event.defaultPrevented && !event.ctrlKey && !event.altKey && !event.metaKey
-    && event.key === "Tab" && workspaceList.workspaces.length && !busy && !workspaceChanging
+    && event.key === "Tab" && workspaceList.workspaces.length && !busy && !workspaceChanging && !tileDraft
     && !incomingTileKind && !externalDragging && !tileReorder) {
     event.preventDefault();
     const { activeId, workspaces } = workspaceList;

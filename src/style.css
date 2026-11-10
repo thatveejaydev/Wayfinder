@@ -99,6 +99,10 @@ button { font: inherit; }
 
 .segment.active-submenu { fill: var(--palette-active); stroke: var(--palette-custom-border, #78b9ef); }
 .segment.selected-tile { fill: var(--palette-selected); stroke: var(--palette-custom-border, var(--palette-hover-border)); }
+.draft-segment > .segment-surface {
+  stroke: var(--palette-highlight);
+  stroke-dasharray: 5 4;
+}
 .segment.search-selected:not(:hover, .hovered) {
   fill: color-mix(in srgb, var(--palette-background), var(--palette-background-text) 14%);
   stroke: color-mix(in srgb, var(--palette-border), var(--palette-background-text) 45%);
