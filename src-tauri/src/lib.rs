@@ -1,4 +1,3 @@
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
@@ -7,9 +6,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Mutex,
+        LazyLock, Mutex,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     menu::{Menu, MenuItem},
@@ -30,6 +29,15 @@ mod mouse_hotkey;
 mod tile_icons;
 
 static OPEN_FILE_PICKERS: AtomicUsize = AtomicUsize::new(0);
+static TAILWIND_COLORS: LazyLock<HashSet<String>> = LazyLock::new(|| {
+    serde_json::from_str::<serde_json::Value>(include_str!("../../src/tailwind_colors.json"))
+        .ok()
+        .and_then(|value| value.as_object().map(|map| map.keys().cloned().collect()))
+        .unwrap_or_default()
+});
+static INSTALLED_APPS_CACHE: LazyLock<Mutex<Option<(Instant, Vec<InstalledApp>)>>> =
+    LazyLock::new(|| Mutex::new(None));
+const INSTALLED_APPS_TTL: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,7 +63,7 @@ struct DragSession {
     kind: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InstalledApp {
     name: String,
@@ -285,22 +293,43 @@ fn load_appearance(app: &AppHandle) -> Appearance {
         .clamped()
 }
 
-#[tauri::command]
-fn get_appearance(app: AppHandle) -> Appearance {
-    load_appearance(&app)
+fn cached_appearance(app: &AppHandle) -> Appearance {
+    app.try_state::<Mutex<Appearance>>()
+        .and_then(|state| state.lock().ok().map(|value| value.clone()))
+        .unwrap_or_else(|| load_appearance(app))
 }
 
 #[tauri::command]
-fn set_appearance(app: AppHandle, appearance: Appearance) -> Result<Appearance, String> {
+fn get_appearance(app: AppHandle) -> Appearance {
+    cached_appearance(&app)
+}
+
+#[tauri::command]
+fn set_appearance(
+    app: AppHandle,
+    state: State<'_, Mutex<Appearance>>,
+    appearance: Appearance,
+) -> Result<Appearance, String> {
     let appearance = appearance.clamped();
     let json = serde_json::to_vec_pretty(&appearance).map_err(|e| e.to_string())?;
     fs::write(appearance_path(&app)?, json).map_err(|e| e.to_string())?;
+    if let Ok(mut cached) = state.lock() {
+        *cached = appearance.clone();
+    }
     Ok(appearance)
 }
 
 #[tauri::command]
-fn preview_appearance(app: AppHandle, appearance: Appearance) -> Result<(), String> {
-    app.emit_to("main", "appearance-changed", appearance.clamped())
+fn preview_appearance(
+    app: AppHandle,
+    state: State<'_, Mutex<Appearance>>,
+    appearance: Appearance,
+) -> Result<(), String> {
+    let clamped = appearance.clamped();
+    if let Ok(mut cached) = state.lock() {
+        *cached = clamped.clone();
+    }
+    app.emit_to("main", "appearance-changed", clamped)
         .map_err(|e| e.to_string())
 }
 
@@ -327,26 +356,7 @@ fn save_shortcuts(app: &AppHandle, shortcuts: &[Shortcut]) -> Result<(), String>
 }
 
 fn preview_for(path: &Path, metadata: &fs::Metadata) -> Option<String> {
-    if metadata.len() > MAX_PREVIEW_BYTES {
-        return None;
-    }
-    let mime = match path
-        .extension()?
-        .to_string_lossy()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => return None,
-    };
-    let bytes = fs::read(path).ok()?;
-    Some(format!(
-        "data:{mime};base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    ))
+    tile_icons::image_preview(path, metadata, MAX_PREVIEW_BYTES)
 }
 
 fn kind_for(path: &Path, is_dir: bool) -> String {
@@ -513,10 +523,7 @@ fn tile_color(color: Option<String>) -> Result<Option<String>, String> {
     match color {
         Some(value) if is_hex_color(&value) => Ok(Some(value.to_ascii_lowercase())),
         Some(value) => {
-            let colors: serde_json::Value =
-                serde_json::from_str(include_str!("../../src/tailwind_colors.json"))
-                    .map_err(|error| error.to_string())?;
-            if colors.get(&value).is_some() {
+            if TAILWIND_COLORS.contains(&value) {
                 Ok(Some(value))
             } else {
                 Err("Choose a valid tile color".into())
@@ -750,51 +757,70 @@ async fn pick_tile_path(app: AppHandle, kind: String) -> Result<Option<String>, 
         .transpose()
 }
 
-#[tauri::command]
-async fn list_installed_apps() -> Vec<InstalledApp> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let mut apps = Vec::new();
-        for (variable, suffix) in [
-            ("APPDATA", "Microsoft/Windows/Start Menu/Programs"),
-            ("ProgramData", "Microsoft/Windows/Start Menu/Programs"),
-        ] {
-            let Ok(root) = std::env::var(variable) else {
-                continue;
-            };
-            for entry in WalkDir::new(Path::new(&root).join(suffix))
-                .max_depth(7)
-                .into_iter()
-                .filter_map(Result::ok)
-            {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                if !matches!(
-                    path.extension()
-                        .and_then(|extension| extension.to_str())
-                        .unwrap_or("")
-                        .to_ascii_lowercase()
-                        .as_str(),
-                    "exe" | "lnk"
-                ) {
-                    continue;
-                }
-                let Some(name) = path.file_stem() else {
-                    continue;
-                };
-                apps.push(InstalledApp {
-                    name: name.to_string_lossy().into_owned(),
-                    path: path.to_string_lossy().into_owned(),
-                });
+fn collect_installed_apps() -> Vec<InstalledApp> {
+    if let Ok(cache) = INSTALLED_APPS_CACHE.lock() {
+        if let Some((timestamp, apps)) = cache.as_ref() {
+            if timestamp.elapsed() < INSTALLED_APPS_TTL {
+                return apps.clone();
             }
         }
-        apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        apps.dedup_by(|a, b| a.path.eq_ignore_ascii_case(&b.path));
-        apps
-    })
-    .await
-    .unwrap_or_default()
+    }
+    let mut apps = Vec::new();
+    for (variable, suffix) in [
+        ("APPDATA", "Microsoft/Windows/Start Menu/Programs"),
+        ("ProgramData", "Microsoft/Windows/Start Menu/Programs"),
+    ] {
+        let Ok(root) = std::env::var(variable) else {
+            continue;
+        };
+        for entry in WalkDir::new(Path::new(&root).join(suffix))
+            .max_depth(7)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            if !matches!(
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "exe" | "lnk"
+            ) {
+                continue;
+            }
+            let Some(name) = path.file_stem() else {
+                continue;
+            };
+            apps.push(InstalledApp {
+                name: name.to_string_lossy().into_owned(),
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    apps.dedup_by(|a, b| a.path.eq_ignore_ascii_case(&b.path));
+    if let Ok(mut cache) = INSTALLED_APPS_CACHE.lock() {
+        *cache = Some((Instant::now(), apps.clone()));
+    }
+    apps
+}
+
+#[tauri::command]
+async fn list_installed_apps() -> Vec<InstalledApp> {
+    if let Ok(cache) = INSTALLED_APPS_CACHE.lock() {
+        if let Some((timestamp, apps)) = cache.as_ref() {
+            if timestamp.elapsed() < INSTALLED_APPS_TTL {
+                return apps.clone();
+            }
+        }
+    }
+    tauri::async_runtime::spawn_blocking(collect_installed_apps)
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -818,18 +844,24 @@ fn begin_tile_drag(
     app.emit_to("main", "tile-drag-start", kind)
         .map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
-    std::thread::spawn(move || loop {
-        let active = app
-            .state::<Mutex<DragSession>>()
-            .lock()
-            .map(|session| session.generation == generation && session.kind.is_some())
-            .unwrap_or(false);
-        if !active {
-            break;
+    std::thread::spawn(move || {
+        let mut last_position: Option<Option<(i32, i32)>> = None;
+        loop {
+            let active = app
+                .state::<Mutex<DragSession>>()
+                .lock()
+                .map(|session| session.generation == generation && session.kind.is_some())
+                .unwrap_or(false);
+            if !active {
+                break;
+            }
+            let position = cursor_in_palette(&app);
+            if last_position != Some(position) {
+                last_position = Some(position);
+                let _ = app.emit_to("main", "tile-drag-position", position);
+            }
+            std::thread::sleep(Duration::from_millis(24));
         }
-        let position = cursor_in_palette(&app);
-        let _ = app.emit_to("main", "tile-drag-position", position);
-        std::thread::sleep(Duration::from_millis(24));
     });
     Ok(())
 }
@@ -1055,6 +1087,7 @@ fn set_edit_window_visible(app: AppHandle, visible: bool) -> Result<(), String> 
         .get_webview_window("editor")
         .ok_or_else(|| "Edit window not found".to_string())?;
     if visible {
+        let _ = tauri::async_runtime::spawn_blocking(collect_installed_apps);
         let _ = fit_editor_height(app.clone(), 0);
         position_editor(&app);
         editor.show().map_err(|e| e.to_string())?;
@@ -1309,7 +1342,7 @@ fn show_palette(app: &AppHandle) {
 fn present_palette(app: AppHandle) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("Palette window not found")?;
     if !window.is_visible().unwrap_or(false) {
-        let _ = position_palette(&window, load_appearance(&app).open_at_screen_center);
+        let _ = position_palette(&window, cached_appearance(&app).open_at_screen_center);
         window.show().map_err(|error| error.to_string())?;
         mouse_hotkey::watch_outside_clicks(true);
     }
@@ -1375,11 +1408,15 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            import_previous_data(&app.path().app_data_dir()?)?;
+            let app_data_dir = app.path().app_data_dir()?;
+            import_previous_data(&app_data_dir)?;
+            tile_icons::init(app_data_dir.join("icon-cache"));
             #[cfg(all(debug_assertions, target_os = "windows"))]
             watch_dev_supervisor(app.handle().clone());
             let shortcuts = load_shortcuts(app.handle());
+            let appearance = load_appearance(app.handle());
             app.manage(Mutex::new(shortcuts));
+            app.manage(Mutex::new(appearance));
             app.manage(Mutex::new(DragSession::default()));
             app.handle()
                 .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
@@ -1404,8 +1441,8 @@ pub fn run() {
             tray.build(app)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
                 if window.label() == "main" {
                     api.prevent_close();
                     dismiss_palette(window.app_handle().clone());
@@ -1415,6 +1452,18 @@ pub fn run() {
                     let _ = window.app_handle().emit_to("main", "editor-closed", ());
                 }
             }
+            #[cfg(target_os = "windows")]
+            WindowEvent::Focused(false) if window.label() == "main" => {
+                let app = window.app_handle();
+                if !file_picker_open()
+                    && !app
+                        .get_webview_window("editor")
+                        .is_some_and(|editor| editor.is_visible().unwrap_or(false))
+                {
+                    dismiss_palette(app.clone());
+                }
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             list_shortcuts,

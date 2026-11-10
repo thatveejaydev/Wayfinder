@@ -227,6 +227,19 @@ function point(radius: number, angle: number): [number, number] {
   return [CENTER + Math.cos(radians) * radius, CENTER + Math.sin(radians) * radius];
 }
 
+const segmentPathCache = new Map<string, { tile: string; accent: string }>();
+
+function cachedRingSegmentPaths(span: number, inner: number, outer: number, withAccent: boolean) {
+  const key = `${span.toFixed(4)}:${inner}:${outer}:${appearance.tileCornerRadius}:${appearance.tilePadding}:${appearance.borderThickness}:${appearance.colorLabelDistance}:${withAccent ? 1 : 0}`;
+  let paths = segmentPathCache.get(key);
+  if (!paths) {
+    if (segmentPathCache.size > 256) segmentPathCache.clear();
+    paths = ringSegmentPaths(-span / 2, span / 2, inner, outer, withAccent);
+    segmentPathCache.set(key, paths);
+  }
+  return { key, paths };
+}
+
 function positionTile(button: HTMLButtonElement, radius: number, angle: number) {
   const [x, y] = point(radius, angle);
   button.style.left = `${x / 620 * 100}%`;
@@ -236,11 +249,16 @@ function positionTile(button: HTMLButtonElement, radius: number, angle: number) 
 
 function positionSegment(segment: SVGGElement, start: number, end: number, inner: number, outer: number) {
   const [hitArea, surface, accent] = segment.children;
-  const paths = ringSegmentPaths(start, end, inner, outer, Boolean(accent));
-  hitArea.setAttribute("d", paths.tile);
-  surface.setAttribute("d", paths.tile);
-  accent?.setAttribute("d", paths.accent);
-  segment.style.setProperty("--submenu-angle", `${(start + end) / 2}deg`);
+  const span = end - start;
+  const middle = (start + end) / 2;
+  const { key, paths } = cachedRingSegmentPaths(span, inner, outer, Boolean(accent));
+  if (segment.dataset.pathKey !== key) {
+    segment.dataset.pathKey = key;
+    hitArea.setAttribute("d", paths.tile);
+    surface.setAttribute("d", paths.tile);
+    accent?.setAttribute("d", paths.accent);
+  }
+  segment.style.setProperty("--submenu-angle", `${middle}deg`);
 }
 
 function loadShortcutIcon(item: Shortcut, container: HTMLElement) {
@@ -886,6 +904,23 @@ async function finishTileDrop(kind: TileKind, target: DropTarget) {
   }
 }
 
+type CachedTileEntry = {
+  path: SVGGElement;
+  button: HTMLButtonElement;
+  signature: string;
+  item: Shortcut;
+  level: TileReorder["level"];
+};
+const tileElementPool = new Map<string, CachedTileEntry>();
+
+function pruneTilePool(validIds?: Set<string>) {
+  for (const [key, entry] of tileElementPool) {
+    if (validIds && !validIds.has(entry.item.id)) {
+      tileElementPool.delete(key);
+    }
+  }
+}
+
 function appendTile(
   item: Shortcut,
   level: TileReorder["level"],
@@ -899,6 +934,48 @@ function appendTile(
   entrance?: { index: number; count: number },
   searchSelected = false,
 ) {
+  const searching = Boolean(searchQuery.trim());
+  const activeSubmenu = !searching && activeSubmenus.includes(item.id);
+  const selected = editing && selectedTileId === item.id;
+  const name = shortcutName(item);
+  const action = editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
+  const location = searching ? ` · ${shortcutBreadcrumb(item)}` : "";
+  const labelText = `${action} ${name}${location}`;
+  const poolKey = `${level}:${item.id}`;
+  const signature = `${item.kind}\0${item.name}\0${item.path}\0${item.text ?? ""}\0${item.color ?? ""}\0${item.emoji ?? ""}\0${item.preview ?? ""}\0${editing ? 1 : 0}\0${searching ? 1 : 0}`;
+
+  let entry = tileElementPool.get(poolKey);
+  if (entry && entry.signature === signature) {
+    entry.item = item;
+    entry.level = level;
+    const { path, button } = entry;
+    for (const anim of path.getAnimations()) anim.cancel();
+    for (const anim of button.getAnimations()) anim.cancel();
+    positionSegment(path, start, end, innerRadius, outerRadius);
+    path.classList.toggle("active-submenu", activeSubmenu);
+    path.classList.toggle("selected-tile", selected);
+    path.classList.toggle("search-selected", searchSelected);
+    path.classList.remove("hovered", "reorder-source");
+
+    positionTile(button, (innerRadius + outerRadius) / 2, middle);
+    button.classList.toggle("active-submenu", activeSubmenu);
+    button.classList.remove("hovered", "reorder-source");
+    button.setAttribute("aria-label", labelText);
+    button.title = labelText;
+    if (searchSelected) button.setAttribute("aria-current", "true");
+    else button.removeAttribute("aria-current");
+    if (editing) button.setAttribute("aria-pressed", String(selected));
+    else button.removeAttribute("aria-pressed");
+    if (item.kind === "submenu") {
+      const offset = (outerRadius - innerRadius) / 2 - 12;
+      button.style.setProperty("--submenu-chevron-offset", String(offset / 620));
+    }
+    segments.appendChild(path);
+    layer.appendChild(button);
+    if (entrance) animateTileEntrance(path, button, level, middle, (innerRadius + outerRadius) / 2, entrance);
+    return;
+  }
+
   const path = document.createElementNS(SVG_NS, "g");
   const hitArea = document.createElementNS(SVG_NS, "path");
   hitArea.classList.add("segment-hit-area");
@@ -916,15 +993,10 @@ function appendTile(
   positionSegment(path, start, end, innerRadius, outerRadius);
   path.setAttribute("class", "segment");
   path.dataset.level = String(level);
-  const searching = Boolean(searchQuery.trim());
-  const activeSubmenu = !searching && activeSubmenus.includes(item.id);
   path.classList.toggle("active-submenu", activeSubmenu);
   path.dataset.id = item.id;
-  const selected = editing && selectedTileId === item.id;
   path.classList.toggle("selected-tile", selected);
   path.classList.toggle("search-selected", searchSelected);
-  path.addEventListener("click", (event) => activate(item, level, event.shiftKey));
-  segments.appendChild(path);
 
   const button = document.createElement("button");
   button.className = `shortcut${level ? ` child-shortcut level-${level}` : ""}`;
@@ -935,13 +1007,10 @@ function appendTile(
   button.dataset.level = String(level);
   button.type = "button";
   positionTile(button, (innerRadius + outerRadius) / 2, middle);
-  const name = shortcutName(item);
-  const action = editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
-  const location = searching ? ` · ${shortcutBreadcrumb(item)}` : "";
-  button.setAttribute("aria-label", `${action} ${name}${location}`);
+  button.setAttribute("aria-label", labelText);
   if (searchSelected) button.setAttribute("aria-current", "true");
   if (editing) button.setAttribute("aria-pressed", String(selected));
-  button.title = `${action} ${name}${location}`;
+  button.title = labelText;
   let tileIcon = "";
   if (item.kind === "submenu") {
     const offset = (outerRadius - innerRadius) / 2 - 12;
@@ -964,23 +1033,30 @@ function appendTile(
   }
   const label = button.querySelector<HTMLElement>(".shortcut-label");
   if (label) label.textContent = name;
-  const prepareReorder = (event: PointerEvent) => prepareTileReorder(event, item, level, path, button);
+
+  const createdEntry: CachedTileEntry = { path, button, signature, item, level };
+  tileElementPool.set(poolKey, createdEntry);
+
+  const prepareReorder = (event: PointerEvent) => prepareTileReorder(event, createdEntry.item, createdEntry.level, path, button);
+  path.addEventListener("click", (event) => activate(createdEntry.item, createdEntry.level, event.shiftKey));
   path.addEventListener("pointerdown", prepareReorder);
   button.addEventListener("pointerdown", prepareReorder);
   button.addEventListener("click", (event) => {
-    if (editing && (event.target as Element).closest(".remove-badge")) void removeItem(item);
-    else void activate(item, level, event.shiftKey);
+    if (editing && (event.target as Element).closest(".remove-badge")) void removeItem(createdEntry.item);
+    else void activate(createdEntry.item, createdEntry.level, event.shiftKey);
   });
   button.addEventListener("pointerenter", () => {
     path.classList.add("hovered");
-    hoverTile(item, level);
+    hoverTile(createdEntry.item, createdEntry.level);
   });
   button.addEventListener("pointerleave", () => path.classList.remove("hovered"));
   path.addEventListener("pointerenter", () => {
     button.classList.add("hovered");
-    hoverTile(item, level);
+    hoverTile(createdEntry.item, createdEntry.level);
   });
   path.addEventListener("pointerleave", () => button.classList.remove("hovered"));
+
+  segments.appendChild(path);
   layer.appendChild(button);
   if (entrance) animateTileEntrance(path, button, level, middle, (innerRadius + outerRadius) / 2, entrance);
 }
@@ -995,7 +1071,6 @@ function animateTileEntrance(
 ) {
   const root = level === 0;
   const turn = Math.min(18, 135 / count);
-  const [x, y] = point(radius, angle);
   const [fromX, fromY] = root ? point(radius, angle - turn) : point(radius - 12, angle);
   const timing: KeyframeAnimationOptions = {
     duration: root ? 145 : 115,
@@ -1003,9 +1078,10 @@ function animateTileEntrance(
     easing: "cubic-bezier(.2,.75,.25,1)",
     fill: "backwards",
   };
+  const rotation = "rotate(var(--submenu-angle))";
   path.animate([
-    { opacity: 0, transform: root ? `rotate(-${turn}deg)` : `translate(${fromX - x}px, ${fromY - y}px)` },
-    { opacity: 1, transform: "none" },
+    { opacity: 0, transform: root ? `rotate(calc(var(--submenu-angle) - ${turn}deg))` : `${rotation} translateX(-12px)` },
+    { opacity: 1, transform: root ? rotation : `${rotation} translateX(0px)` },
   ], timing);
   button.animate([
     { opacity: 0, left: `${fromX / 6.2}%`, top: `${fromY / 6.2}%` },
@@ -1068,6 +1144,30 @@ function refreshSubmenus(firstLevel: 1 | 2, openingLevel?: 1 | 2) {
   });
 }
 
+function ensureStageShell() {
+  let stage = app.querySelector<HTMLElement>(".stage");
+  if (!stage) {
+    app.innerHTML = `<label class="palette-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+      <input id="palette-search" type="text" aria-label="Search shortcuts" placeholder="Search shortcuts" autocomplete="off" spellcheck="false" />
+    </label>
+    <main class="stage">
+      <div class="palette" aria-label="Wayfinder shortcut palette">
+        <svg class="ring-svg" viewBox="0 0 620 620" aria-hidden="true">
+          <g class="ring-segments"></g>
+          <g class="child-segments"></g>
+          <path class="root-drop-indicator drop-indicator" />
+        </svg>
+        <div class="item-layer"></div>
+        <div class="toast" role="status" aria-live="polite"></div>
+      </div>
+    </main>`;
+    bindPaletteSearch(app.querySelector<HTMLInputElement>("#palette-search")!);
+    stage = app.querySelector<HTMLElement>(".stage")!;
+  }
+  return stage;
+}
+
 function render(transition?: "opening" | "search") {
   const animateOpening = appearance.animations && transition === "opening";
   const animateSearch = appearance.animations && transition === "search";
@@ -1102,42 +1202,51 @@ function render(transition?: "opening" | "search") {
   app.style.setProperty("--border-thickness", `${appearance.borderThickness}px`);
   const emptyRadius = (OUTER + appearance.innerRadius) / 2;
   const emptyWidth = OUTER - appearance.innerRadius;
-  const stageMarkup = `
-    <main class="stage ${dragging ? "is-dragging" : ""} ${editing ? "is-editing" : ""}">
-      <div class="palette" aria-label="Wayfinder shortcut palette">
-        <svg class="ring-svg" viewBox="0 0 620 620" aria-hidden="true">
-          ${roots.length ? "" : `<circle class="ring-empty" cx="310" cy="310" r="${emptyRadius}" stroke-width="${emptyWidth}" />`}
-          <g class="ring-segments"></g>
-          <g class="child-segments"></g>
-          <path class="root-drop-indicator drop-indicator" />
-        </svg>
-        <div class="item-layer"></div>
-        ${searching ? `<div class="search-summary" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%" role="status">
-          <span>${matches.length > MAX_ITEMS ? `${pageStart + 1}–${pageStart + roots.length} of ` : ""}${matches.length ? `${matches.length} ${matches.length === 1 ? "match" : "matches"}` : "No matches"}</span>
-          ${selectedResult ? '<span class="search-breadcrumb"></span>' : ""}
-        </div>` : focused ? `<div class="focus-controls" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%">
-          <span class="focus-title"></span>
-          <button class="focus-back" type="button">Back</button>
-        </div>` : `<button class="edit-button" type="button" aria-label="${editing ? "Finish editing" : "Edit shortcuts"}" title="${editing ? "Done editing" : "Edit shortcuts"}" aria-pressed="${editing}">
-          <svg viewBox="0 0 24 24" aria-hidden="true">${editing
-            ? '<path d="m9.2 16.3-4.5-4.5-1.7 1.7 6.2 6.2L21 7.9l-1.7-1.7z"/>'
-            : `<path d="M10 2h4l.5 3 1.5.9 2.8-1.1 2 3.4-2.3 1.9v1.8l2.3 1.9-2 3.4-2.8-1.1-1.5.9-.5 3h-4l-.5-3-1.5-.9-2.8 1.1-2-3.4 2.3-1.9v-1.8L3.2 8.2l2-3.4L8 5.9 9.5 5 10 2Zm2 6a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z" fill-rule="evenodd" transform="translate(0 1)"/>`}</svg>
-        </button>`}
-        ${!searching && !roots.length ? '<div class="empty-prompt"><span class="drop-arrow">↓</span><span>DRAG & DROP<br/>NEW ITEMS HERE</span></div>' : ""}
-        <div class="toast" role="status" aria-live="polite"></div>
-      </div>
-    </main>
-  `;
-  const stage = app.querySelector(".stage");
-  if (stage) {
-    stage.outerHTML = stageMarkup;
+
+  const stage = ensureStageShell();
+  stage.className = `stage ${dragging ? "is-dragging" : ""} ${editing ? "is-editing" : ""}`;
+  const palette = stage.querySelector<HTMLElement>(".palette")!;
+  const ringSvg = palette.querySelector<SVGSVGElement>(".ring-svg")!;
+  const segments = ringSvg.querySelector<SVGGElement>(".ring-segments")!;
+  const childSegments = ringSvg.querySelector<SVGGElement>(".child-segments")!;
+  const layer = palette.querySelector<HTMLDivElement>(".item-layer")!;
+  const toast = palette.querySelector<HTMLElement>(".toast")!;
+
+  let ringEmpty = ringSvg.querySelector<SVGCircleElement>(".ring-empty");
+  if (roots.length) {
+    ringEmpty?.remove();
   } else {
-    app.innerHTML = `<label class="palette-search">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
-      <input id="palette-search" type="text" aria-label="Search shortcuts" placeholder="Search shortcuts" autocomplete="off" spellcheck="false" />
-    </label>${stageMarkup}`;
-    bindPaletteSearch(app.querySelector<HTMLInputElement>("#palette-search")!);
+    if (!ringEmpty) {
+      ringEmpty = document.createElementNS(SVG_NS, "circle");
+      ringEmpty.setAttribute("class", "ring-empty");
+      ringEmpty.setAttribute("cx", "310");
+      ringEmpty.setAttribute("cy", "310");
+      ringSvg.prepend(ringEmpty);
+    }
+    ringEmpty.setAttribute("r", String(emptyRadius));
+    ringEmpty.setAttribute("stroke-width", String(emptyWidth));
+    ringEmpty.style.removeProperty("display");
   }
+
+  segments.replaceChildren();
+  childSegments.replaceChildren();
+  layer.replaceChildren();
+
+  palette.querySelectorAll(".search-summary, .focus-controls, .edit-button, .empty-prompt").forEach((node) => node.remove());
+  const centerTemplate = document.createElement("template");
+  centerTemplate.innerHTML = `${searching ? `<div class="search-summary" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%" role="status">
+    <span>${matches.length > MAX_ITEMS ? `${pageStart + 1}–${pageStart + roots.length} of ` : ""}${matches.length ? `${matches.length} ${matches.length === 1 ? "match" : "matches"}` : "No matches"}</span>
+    ${selectedResult ? '<span class="search-breadcrumb"></span>' : ""}
+  </div>` : focused ? `<div class="focus-controls" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%">
+    <span class="focus-title"></span>
+    <button class="focus-back" type="button">Back</button>
+  </div>` : `<button class="edit-button" type="button" aria-label="${editing ? "Finish editing" : "Edit shortcuts"}" title="${editing ? "Done editing" : "Edit shortcuts"}" aria-pressed="${editing}">
+    <svg viewBox="0 0 24 24" aria-hidden="true">${editing
+      ? '<path d="m9.2 16.3-4.5-4.5-1.7 1.7 6.2 6.2L21 7.9l-1.7-1.7z"/>'
+      : `<path d="M10 2h4l.5 3 1.5.9 2.8-1.1 2 3.4-2.3 1.9v1.8l2.3 1.9-2 3.4-2.8-1.1-1.5.9-.5 3h-4l-.5-3-1.5-.9-2.8 1.1-2-3.4 2.3-1.9v-1.8L3.2 8.2l2-3.4L8 5.9 9.5 5 10 2Zm2 6a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z" fill-rule="evenodd" transform="translate(0 1)"/>`}</svg>
+  </button>`}${!searching && !roots.length ? '<div class="empty-prompt"><span class="drop-arrow">↓</span><span>DRAG & DROP<br/>NEW ITEMS HERE</span></div>' : ""}`;
+  palette.insertBefore(centerTemplate.content, toast);
+
   const searchField = app.querySelector<HTMLInputElement>("#palette-search")!;
   const search = searchField.parentElement!;
   search.hidden = editing;
@@ -1150,10 +1259,6 @@ function render(transition?: "opening" | "search") {
     breadcrumb.title = breadcrumb.textContent;
   }
 
-  const segments = document.querySelector<SVGGElement>(".ring-segments")!;
-  const childSegments = document.querySelector<SVGGElement>(".child-segments")!;
-  const layer = document.querySelector<HTMLDivElement>(".item-layer")!;
-
   roots.forEach((item, index) => {
     const [start, end, middle] = segmentAngles(index, roots.length);
     const entering = animateOpening || (previousAngles && !previousAngles.has(item.id));
@@ -1161,7 +1266,7 @@ function render(transition?: "opening" | "search") {
       entering ? { index, count: roots.length } : undefined, selectedResult?.id === item.id);
   });
   if ((animateOpening || previousAngles?.size) && !roots.length) {
-    app.querySelector(".ring-empty")?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 145, easing: "ease-out" });
+    ringSvg.querySelector(".ring-empty")?.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 145, easing: "ease-out" });
   }
   if (!searching && activeSubmenus[0]) renderChildRing(activeSubmenus[0], 1, childSegments, layer, false);
   if (!searching && activeSubmenus[1]) renderChildRing(activeSubmenus[1], 2, childSegments, layer, false);
@@ -1211,6 +1316,7 @@ async function removeItem(item: Shortcut) {
     for (const id of shortcutIcons.keys()) {
       if (!remainingIds.has(id)) shortcutIcons.delete(id);
     }
+    pruneTilePool(remainingIds);
     if (selectedTileId && !remainingIds.has(selectedTileId)) resetEditSelection();
     else activeSubmenus = activeSubmenus.filter((id) => remainingIds.has(id));
     render();
@@ -1585,20 +1691,31 @@ function displayHotkey(combination: string) {
 }
 
 let editorHeightObserver: ResizeObserver | undefined;
+let editorHeightFrame = 0;
+let lastRequestedEditorHeight = 0;
 
 function observeEditorHeight() {
   const settings = app.querySelector<HTMLElement>(".settings");
   if (!settings) return;
   const form = app.querySelector<HTMLFormElement>("#tile-create-form");
   editorHeightObserver?.disconnect();
+  window.cancelAnimationFrame(editorHeightFrame);
+  editorHeightFrame = 0;
   editorHeightObserver = new ResizeObserver(() => {
-    let height = settings.scrollHeight;
-    if (form) {
-      const backdrop = getComputedStyle(form.parentElement!);
-      const frame = form.offsetHeight - form.clientHeight;
-      height = Math.max(height, form.scrollHeight + frame + parseFloat(backdrop.paddingTop) + parseFloat(backdrop.paddingBottom));
-    }
-    void invoke("fit_editor_height", { height: Math.ceil(height) }).catch(() => {});
+    if (editorHeightFrame) return;
+    editorHeightFrame = window.requestAnimationFrame(() => {
+      editorHeightFrame = 0;
+      let height = settings.scrollHeight;
+      if (form && form.isConnected) {
+        const backdrop = getComputedStyle(form.parentElement!);
+        const frame = form.offsetHeight - form.clientHeight;
+        height = Math.max(height, form.scrollHeight + frame + parseFloat(backdrop.paddingTop) + parseFloat(backdrop.paddingBottom));
+      }
+      const nextHeight = Math.ceil(height);
+      if (nextHeight === lastRequestedEditorHeight) return;
+      lastRequestedEditorHeight = nextHeight;
+      void invoke("fit_editor_height", { height: nextHeight }).catch(() => {});
+    });
   });
   editorHeightObserver.observe(settings);
   if (form) {
@@ -1912,10 +2029,16 @@ function openTileForm(kind: TileKind, index: number, parentId: string | null) {
   renderEditor();
 }
 
+let previewAppearanceFrame = 0;
+
 function previewAppearance() {
-  void invoke("preview_appearance", { appearance }).catch((error) => {
-    const status = app.querySelector<HTMLElement>(".settings-status");
-    if (status) status.textContent = `Could not preview: ${String(error)}`;
+  if (previewAppearanceFrame) return;
+  previewAppearanceFrame = window.requestAnimationFrame(() => {
+    previewAppearanceFrame = 0;
+    void invoke("preview_appearance", { appearance }).catch((error) => {
+      const status = app.querySelector<HTMLElement>(".settings-status");
+      if (status) status.textContent = `Could not preview: ${String(error)}`;
+    });
   });
 }
 
@@ -2023,9 +2146,13 @@ async function start() {
       const updated = await invoke<Shortcut[]>("list_shortcuts");
       for (const previous of shortcuts) {
         const current = updated.find((item) => item.id === previous.id);
-        if (!current || current.path !== previous.path || current.kind !== previous.kind) shortcutIcons.delete(previous.id);
+        if (!current || current.path !== previous.path || current.kind !== previous.kind) {
+          shortcutIcons.delete(previous.id);
+          for (const level of [0, 1, 2] as const) tileElementPool.delete(`${level}:${previous.id}`);
+        }
       }
       shortcuts = updated;
+      pruneTilePool(new Set(shortcuts.map((item) => item.id)));
       const closed = activeSubmenus.findIndex((id) => !shortcuts.some((item) => item.id === id && item.kind === "submenu"));
       if (closed !== -1) activeSubmenus = activeSubmenus.slice(0, closed);
       render();
@@ -2035,18 +2162,37 @@ async function start() {
         editing = false;
         resetEditSelection();
         render();
+      } else if (searchQuery || activeSubmenus.length) {
+        resetPaletteSearch();
+        activeSubmenus = [];
+        render();
       }
     });
     await listen<Appearance>("appearance-changed", (event) => {
-      const geometryChanged = sliderDefinitions.some(({ key }) => key !== "shellSize" && event.payload[key] !== appearance[key]);
-      const shellChanged = event.payload.shellSize !== appearance.shellSize;
-      const animationsDisabled = appearance.animations && !event.payload.animations;
-      appearance = event.payload;
+      const next = event.payload;
+      const hasColorLabels = shortcuts.some((item) => Boolean(item.color));
+      const geometryKeys: AppearanceKey[] = ["innerRadius", "tileCornerRadius", "tilePadding", "submenuPadding"];
+      if (hasColorLabels) geometryKeys.push("borderThickness", "colorLabelDistance");
+      const geometryChanged = geometryKeys.some((key) => next[key] !== appearance[key]);
+      const shellChanged = next.shellSize !== appearance.shellSize;
+      const textChanged = next.textSize !== appearance.textSize;
+      const borderChanged = next.borderThickness !== appearance.borderThickness;
+      const animationsDisabled = appearance.animations && !next.animations;
+      appearance = next;
       applyPreferences();
-      if (geometryChanged || animationsDisabled) render();
-      else if (shellChanged) {
-        app.style.setProperty("--tile-size", `${appearance.shellSize}px`);
-        app.style.setProperty("--content-scale", `${Math.min(1, appearance.shellSize / 620)}`);
+      if (geometryChanged || animationsDisabled) {
+        render();
+      } else {
+        if (shellChanged) {
+          app.style.setProperty("--tile-size", `${appearance.shellSize}px`);
+          app.style.setProperty("--content-scale", `${Math.min(1, appearance.shellSize / 620)}`);
+        }
+        if (textChanged) {
+          app.style.setProperty("--text-size", `${appearance.textSize}px`);
+        }
+        if (borderChanged) {
+          app.style.setProperty("--border-thickness", `${appearance.borderThickness}px`);
+        }
       }
     });
     [shortcuts, appearance] = await Promise.all([

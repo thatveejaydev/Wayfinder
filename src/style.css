@@ -37,7 +37,7 @@ button { font: inherit; }
   place-items: center;
 }
 
-:root[data-cast-shadow] .stage {
+:root[data-cast-shadow] .ring-svg {
   filter: drop-shadow(0 18px 30px rgba(0, 0, 0, .42));
 }
 
@@ -62,6 +62,7 @@ button { font: inherit; }
 }
 
 .segment {
+  transform: rotate(var(--submenu-angle));
   transform-box: view-box;
   transform-origin: center;
   fill: var(--palette-background, #181818);
@@ -301,7 +302,12 @@ button { font: inherit; }
 .shortcut { --hover-slide: calc(var(--tile-size, 620px) / 155); }
 
 :root:not([data-no-animations]) #app:not([data-reorder-level]) .stage:not(.is-dragging)
-  :is(.segment:is(:hover, .hovered) > :is(.segment-surface, .segment-accent), .shortcut:is(:hover, .hovered) > *) {
+  .segment:is(:hover, .hovered) > :is(.segment-surface, .segment-accent) {
+  translate: var(--hover-slide) 0;
+}
+
+:root:not([data-no-animations]) #app:not([data-reorder-level]) .stage:not(.is-dragging)
+  .shortcut:is(:hover, .hovered) > * {
   translate: calc(var(--hover-slide) * cos(var(--submenu-angle)))
     calc(var(--hover-slide) * sin(var(--submenu-angle)));
 }

@@ -59,9 +59,12 @@ impl fmt::Display for MouseHotkey {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::MouseHotkey;
-    use std::sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering::Relaxed},
-        OnceLock,
+    use std::{
+        sync::{
+            atomic::{AtomicBool, AtomicIsize, AtomicU8, Ordering::Relaxed},
+            mpsc, OnceLock,
+        },
+        thread::{self, ThreadId},
     };
     use tauri::AppHandle;
     use windows::Win32::{
@@ -71,14 +74,16 @@ mod platform {
                 GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
             },
             WindowsAndMessaging::{
-                CallNextHookEx, SetWindowsHookExW, MSLLHOOKSTRUCT, WH_MOUSE_LL, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP,
-                WM_XBUTTONDOWN, WM_XBUTTONUP,
+                CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, MSLLHOOKSTRUCT,
+                WH_MOUSE_LL, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
             },
         },
     };
 
     static APP: OnceLock<AppHandle> = OnceLock::new();
+    static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
+    static HOOK: AtomicIsize = AtomicIsize::new(0);
     static BINDING: AtomicU8 = AtomicU8::new(0);
     static SUPPRESSED: AtomicU8 = AtomicU8::new(0);
     static WATCH_OUTSIDE_CLICKS: AtomicBool = AtomicBool::new(false);
@@ -88,17 +93,59 @@ mod platform {
     }
 
     pub(crate) fn init(app: &AppHandle) {
-        match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_event), None, 0) } {
-            Ok(_) => {
-                let _ = APP.set(app.clone());
+        let _ = APP.set(app.clone());
+        let _ = MAIN_THREAD.set(thread::current().id());
+    }
+
+    fn sync_hook_on_main_thread(enable: bool) -> Result<(), String> {
+        let current = HOOK.load(Relaxed);
+        if enable {
+            if current != 0 {
+                return Ok(());
             }
-            Err(error) => eprintln!("Could not install the mouse hotkey hook: {error}"),
+            match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_event), None, 0) } {
+                Ok(hook) => {
+                    HOOK.store(hook.0 as isize, Relaxed);
+                    Ok(())
+                }
+                Err(error) => {
+                    eprintln!("Could not install the mouse hotkey hook: {error}");
+                    Err("Windows mouse hotkeys are unavailable.".into())
+                }
+            }
+        } else {
+            let previous = HOOK.swap(0, Relaxed);
+            if previous != 0 {
+                let _ = unsafe { UnhookWindowsHookEx(HHOOK(previous as *mut _)) };
+            }
+            Ok(())
         }
     }
 
     pub(crate) fn set(hotkey: Option<MouseHotkey>) -> Result<(), String> {
-        if hotkey.is_some() && APP.get().is_none() {
-            return Err("Windows mouse hotkeys are unavailable.".into());
+        let Some(app) = APP.get() else {
+            return if hotkey.is_some() {
+                Err("Windows mouse hotkeys are unavailable.".into())
+            } else {
+                Ok(())
+            };
+        };
+        let need_hook = hotkey.is_some();
+        if need_hook || HOOK.load(Relaxed) != 0 {
+            let on_main = MAIN_THREAD.get() == Some(&thread::current().id());
+            if on_main {
+                sync_hook_on_main_thread(need_hook)?;
+            } else {
+                let (tx, rx) = mpsc::sync_channel(1);
+                app.run_on_main_thread(move || {
+                    let _ = tx.send(sync_hook_on_main_thread(need_hook));
+                })
+                .map_err(|error| error.to_string())?;
+                rx.recv().map_err(|error| error.to_string())??;
+            }
+        }
+        if !need_hook {
+            SUPPRESSED.store(0, Relaxed);
         }
         BINDING.store(
             hotkey.map_or(0, |key| key.modifiers << 3 | key.button),
