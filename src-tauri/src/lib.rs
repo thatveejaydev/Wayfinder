@@ -22,6 +22,8 @@ use url::Url;
 use walkdir::WalkDir;
 
 #[cfg(target_os = "windows")]
+mod app_launch;
+#[cfg(target_os = "windows")]
 mod folder_launch;
 #[cfg(target_os = "windows")]
 mod keyboard;
@@ -1046,6 +1048,16 @@ async fn open_shortcut(
             .open_url(normalized_webpage(&item.path)?, None::<&str>)
             .map_err(|error| error.to_string()),
         "submenu" => Ok(()),
+        #[cfg(target_os = "windows")]
+        "app" => tauri::async_runtime::spawn_blocking(move || {
+            app_launch::activate_or_launch(&item.path, || {
+                app.opener()
+                    .open_path(&item.path, None::<&str>)
+                    .map_err(|error| error.to_string())
+            })
+        })
+        .await
+        .map_err(|error| error.to_string())?,
         "folder" => {
             if !Path::new(&item.path).is_dir() {
                 return Err("The original folder no longer exists".into());

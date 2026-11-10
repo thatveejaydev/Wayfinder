@@ -1275,7 +1275,7 @@ function render(transition?: "opening" | "search") {
     const title = app.querySelector<HTMLElement>(".focus-title")!;
     title.textContent = shortcutName(focused);
     title.title = title.textContent;
-    app.querySelector<HTMLButtonElement>(".focus-back")!.addEventListener("click", backFromFocus);
+    app.querySelector<HTMLButtonElement>(".focus-back")!.addEventListener("click", () => backFromFocus("root"));
   }
   app.querySelector<HTMLButtonElement>(".edit-button")?.addEventListener("click", async () => {
     const nextEditing = !editing;
@@ -1334,14 +1334,16 @@ function resetEditSelection() {
   void emitTo("editor", "tile-selection-changed", null).catch(() => {});
 }
 
-function backFromFocus() {
+function backFromFocus(destination: "parent" | "root") {
   const focused = shortcuts.find((item) => item.id === focusedSubmenuId);
-  focusedSubmenuId = focused?.parentId ?? null;
+  focusedSubmenuId = destination === "parent" ? focused?.parentId ?? null : null;
+  if (destination === "root") resetPaletteSearch();
   activeSubmenus = [];
   render();
   const previousTile = Array.from(app.querySelectorAll<HTMLButtonElement>(".shortcut"))
     .find((tile) => tile.dataset.id === focused?.id);
-  previousTile?.focus({ preventScroll: true });
+  const focusTarget = previousTile ?? (destination === "root" ? app.querySelector<HTMLInputElement>("#palette-search") : null);
+  focusTarget?.focus({ preventScroll: true });
 }
 
 async function activate(item: Shortcut, level: number, shiftKey: boolean) {
@@ -1366,10 +1368,13 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean) {
   }
   busy = true;
   try {
+    const openShortcut = () => invoke("open_shortcut", { id: item.id, inTerminal: item.kind === "folder" && shiftKey });
+    // Windows lets the foreground palette hand focus to an existing app window.
+    if (item.kind === "app") await openShortcut();
     await invoke("dismiss_palette");
     activeSubmenus = [];
     render();
-    await invoke("open_shortcut", { id: item.id, inTerminal: item.kind === "folder" && shiftKey });
+    if (item.kind !== "app") await openShortcut();
     rememberShortcut(item.id);
   } catch (error) {
     try {
@@ -2302,7 +2307,7 @@ document.addEventListener("keydown", (event) => {
       return;
     }
     if (focusedSubmenuId !== null) {
-      backFromFocus();
+      backFromFocus("parent");
       return;
     }
     if (editing) {
