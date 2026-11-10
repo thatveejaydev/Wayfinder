@@ -1,6 +1,6 @@
 use std::{
-    mem::size_of, os::windows::process::CommandExt, path::Path, process::Command, ptr, sync::Mutex,
-    thread, time::Duration,
+    os::windows::process::CommandExt, path::Path, process::Command, ptr, sync::Mutex, thread,
+    time::Duration,
 };
 use windows::{
     core::{w, Interface, BOOL, HSTRING, PCWSTR},
@@ -18,10 +18,7 @@ use windows::{
                 CUIAutomation, IUIAutomation, IUIAutomationInvokePattern, TreeScope_Descendants,
                 UIA_AutomationIdPropertyId, UIA_InvokePatternId,
             },
-            Input::KeyboardAndMouse::{
-                SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL,
-                VK_T,
-            },
+            Input::KeyboardAndMouse::{VK_CONTROL, VK_T},
             Shell::{
                 Common::ITEMIDLIST, IShellBrowser, IShellWindows, SHParseDisplayName,
                 SID_STopLevelBrowser, ShellWindows, SBSP_ABSOLUTE, SBSP_SAMEBROWSER,
@@ -149,27 +146,7 @@ fn open_tab_with_keyboard(frame: HWND) -> Result<(), String> {
     if unsafe { GetForegroundWindow() } != frame {
         return Err("File Explorer could not take focus.".into());
     }
-    let inputs = [
-        (VK_CONTROL, false),
-        (VK_T, false),
-        (VK_T, true),
-        (VK_CONTROL, true),
-    ]
-    .map(|(key, released)| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: key,
-                dwFlags: if released {
-                    KEYEVENTF_KEYUP
-                } else {
-                    Default::default()
-                },
-                ..Default::default()
-            },
-        },
-    });
-    if unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) } as usize != inputs.len() {
+    if !crate::keyboard::send_shortcut(VK_CONTROL, VK_T) {
         return Err("Could not send the shortcut to File Explorer.".into());
     }
     Ok(())

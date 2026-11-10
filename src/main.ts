@@ -16,6 +16,7 @@ type Shortcut = {
   text?: string | null;
   parentId?: string | null;
   color?: string | null;
+  emoji?: string | null;
 };
 
 type TileKind = "submenu" | "text" | "folder" | "webpage" | "app";
@@ -37,6 +38,7 @@ function tileLabelColor(value?: string | null): string | null {
 
 const tileNameHints: Partial<Record<EditableTileKind, string>> = {
   app: "(Leave blank for icon only)",
+  submenu: "(Leave blank for emoji only)",
   text: "(Optional · defaults to the first 12 characters)",
   webpage: "(Leave blank for icon only)",
 };
@@ -109,6 +111,7 @@ const CENTER = 310;
 const OUTER = 231;
 const COLOR_LABEL_STROKE_WIDTH = 6;
 const MAX_ITEMS = 12;
+const SUBMENU_TILE_SPAN = 270 / MAX_ITEMS;
 const RECENT_SHORTCUTS_KEY = "wayfinder.recent-shortcuts";
 const MAX_RECENT_SHORTCUTS = 100;
 
@@ -260,7 +263,8 @@ function childrenOf(parentId: string | null): Shortcut[] {
   return shortcuts.filter((item) => (item.parentId ?? null) === parentId);
 }
 
-function shortcutName(item: Pick<Shortcut, "kind" | "name" | "path" | "text">): string {
+function shortcutName(item: Pick<Shortcut, "kind" | "name" | "path" | "text" | "emoji">): string {
+  if (item.kind === "submenu") return item.name || item.emoji || "Submenu";
   if (item.kind === "text" && !item.name) {
     return Array.from(item.text?.trimStart() ?? "").slice(0, 12).join("").trimEnd() || "Whitespace";
   }
@@ -442,15 +446,9 @@ function segmentAngles(index: number, count: number): [number, number, number] {
   return [start, start + span, start + span / 2];
 }
 
-function fanSpan(level: number, count: number): number {
-  return level === 2 ? count * 17 : Math.min(216, count * 22.5);
-}
-
-function fanAngles(level: number, center: number, index: number, count: number): [number, number, number] {
-  const span = fanSpan(level, count);
-  const width = span / count;
-  const start = center - span / 2 + index * width;
-  return [start, start + width, start + width / 2];
+function fanAngles(center: number, index: number, count: number): [number, number, number] {
+  const start = center + (index - count / 2) * SUBMENU_TILE_SPAN;
+  return [start, start + SUBMENU_TILE_SPAN, start + SUBMENU_TILE_SPAN / 2];
 }
 
 function angleNear(angle: number, center: number): number {
@@ -471,7 +469,7 @@ function menuCenter(parentId: string): number | null {
   if (parentCenter === null) return null;
   const siblings = childrenOf(parent.parentId);
   const index = siblings.findIndex((item) => item.id === parentId);
-  return index >= 0 ? fanAngles(1, parentCenter, index, siblings.length)[2] : null;
+  return index >= 0 ? fanAngles(parentCenter, index, siblings.length)[2] : null;
 }
 
 function openSubmenu(item: Shortcut, level: number) {
@@ -529,14 +527,14 @@ function insertionIndex(clientX: number, clientY: number): number | null {
 
 type DropTarget = { parentId: string | null; index: number };
 
-function fanInsertionIndex(level: number, center: number, count: number, angle: number): number | null {
+function fanInsertionIndex(center: number, count: number, angle: number): number | null {
   if (count >= MAX_ITEMS) return null;
   const slots = count + 1;
-  const span = fanSpan(level, slots);
   const near = angleNear(angle, center);
-  if (Math.abs(near - center) > span / 2 + 9) return null;
-  const width = span / slots;
-  return Math.max(0, Math.min(slots - 1, Math.round((near - (center - span / 2 + width / 2)) / width)));
+  const [start] = fanAngles(center, 0, slots);
+  const [, end] = fanAngles(center, slots - 1, slots);
+  if (near < start - 9 || near > end + 9) return null;
+  return Math.max(0, Math.min(slots - 1, Math.floor((near - start) / SUBMENU_TILE_SPAN)));
 }
 
 function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = incomingTileKind): DropTarget | null {
@@ -557,7 +555,7 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
     const deepest = level === 2 || focusedSubmenuId !== null;
     if (!deepest && items.length) {
       const hovered = items.find((_, index) => {
-        const [start, end] = fanAngles(level, center, index, items.length);
+        const [start, end] = fanAngles(center, index, items.length);
         const near = angleNear(angle, center);
         return near >= start && near <= end;
       });
@@ -569,7 +567,7 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
       }
     }
     if (deepest && kind === "submenu") return null;
-    const index = fanInsertionIndex(level, center, items.length, angle);
+    const index = fanInsertionIndex(center, items.length, angle);
     return index === null ? null : { parentId, index };
   }
 
@@ -679,7 +677,7 @@ function updateChildDropIndicator(level: 1 | 2, animate = true) {
     const slot = reorder && reorder.target !== null
       ? reorderSlot(index, reorder.from, reorder.target)
       : index + (active && index >= incomingIndex! ? 1 : 0);
-    const [start, end] = fanAngles(level, center, slot, count);
+    const [start, end] = fanAngles(center, slot, count);
     return [start, end];
   });
   const paths = Array.from(app.querySelectorAll<SVGGElement>(`.child-segments .segment[data-level="${level}"]`));
@@ -687,7 +685,7 @@ function updateChildDropIndicator(level: 1 | 2, animate = true) {
   const emptySlot = app.querySelector<SVGPathElement>(`.submenu-empty-slot[data-level="${level}"]`);
   if (emptySlot) emptySlot.style.display = active ? "none" : "";
   if (previewIndex !== null) {
-    const [start, end] = fanAngles(level, center, previewIndex, count);
+    const [start, end] = fanAngles(center, previewIndex, count);
     placeholder.setAttribute("d", ringSegmentPath(start, end, ring.inner, ring.outer));
     placeholder.classList.add("visible");
   } else {
@@ -781,7 +779,7 @@ function prepareTileReorder(event: PointerEvent, item: Shortcut, level: TileReor
     target: null,
     count: siblings.length,
     ring: level === 0 ? { inner: appearance.innerRadius, outer: OUTER } : submenuRadii()[level - 1],
-    angles: (index) => level === 0 ? segmentAngles(index, siblings.length) : fanAngles(level, center, index, siblings.length),
+    angles: (index) => level === 0 ? segmentAngles(index, siblings.length) : fanAngles(center, index, siblings.length),
     path,
     button,
   };
@@ -927,7 +925,8 @@ function appendTile(
 
   const button = document.createElement("button");
   button.className = `shortcut${level ? ` child-shortcut level-${level}` : ""}`;
-  button.classList.toggle("single-content", item.kind === "text" || item.kind === "submenu" || !item.name);
+  const emoji = item.kind === "submenu" ? item.emoji : null;
+  button.classList.toggle("single-content", item.kind === "text" || (item.kind === "submenu" && !emoji) || !item.name);
   button.classList.toggle("active-submenu", activeSubmenu);
   button.dataset.id = item.id;
   button.dataset.level = String(level);
@@ -945,6 +944,7 @@ function appendTile(
     const offset = (outerRadius - innerRadius) / 2 - 12;
     button.style.setProperty("--submenu-chevron-offset", String(offset / 620));
     tileIcon = '<svg class="submenu-chevron" viewBox="0 0 8 16" aria-hidden="true"><path d="M0 0 8 8 0 16Z" fill="currentColor"/></svg>';
+    if (emoji) tileIcon += '<span class="submenu-emoji" aria-hidden="true"></span>';
   } else if (item.kind !== "text") {
     const thumbnail = item.preview
       ? `<img class="shortcut-image" alt="" src="${item.preview}"/>`
@@ -955,6 +955,7 @@ function appendTile(
     <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3L3 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
   </span>` : "";
   button.innerHTML = `${tileIcon}${item.name || item.kind === "text" || searching ? '<span class="shortcut-label"></span>' : ""}${removeBadge}`;
+  if (emoji) button.querySelector<HTMLElement>(".submenu-emoji")!.textContent = emoji;
   if (!item.preview && (item.kind === "app" || item.kind === "webpage")) {
     loadShortcutIcon(item, button.querySelector<HTMLElement>(".shortcut-icon")!);
   }
@@ -1015,16 +1016,16 @@ function renderChildRing(parentId: string, level: 1 | 2, segments: SVGGElement, 
   const items = childrenOf(parentId);
   const ring = submenuRadii()[level - 1];
   displayedChildAngles[level] = items.map((_, index) => {
-    const [start, end] = fanAngles(level, center, index, items.length);
+    const [start, end] = fanAngles(center, index, items.length);
     return [start, end];
   });
   items.forEach((item, index) => {
-    const [start, end, middle] = fanAngles(level, center, index, items.length);
+    const [start, end, middle] = fanAngles(center, index, items.length);
     appendTile(item, level, start, end, middle, ring.inner, ring.outer, segments, layer,
       animate ? { index, count: items.length } : undefined);
   });
   if (editing && items.length === 0) {
-    const [start, end] = fanAngles(level, center, 0, 1);
+    const [start, end] = fanAngles(center, 0, 1);
     const path = document.createElementNS(SVG_NS, "path");
     path.setAttribute("d", ringSegmentPath(start, end, ring.inner, ring.outer));
     path.setAttribute("class", "submenu-empty-slot");
@@ -1164,7 +1165,7 @@ function render(transition?: "opening" | "search") {
 
   if (!searching && focused) {
     const title = app.querySelector<HTMLElement>(".focus-title")!;
-    title.textContent = focused.name || "Submenu";
+    title.textContent = shortcutName(focused);
     title.title = title.textContent;
     app.querySelector<HTMLButtonElement>(".focus-back")!.addEventListener("click", backFromFocus);
   }
@@ -1240,8 +1241,8 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean) {
     selectedTileId = item.id;
     if (item.kind !== "submenu") activeSubmenus = activeSubmenus.slice(0, level);
     if (!openSubmenu(item, level)) render();
-    const { id, name, kind, path, text, color } = item;
-    await emitTo("editor", "tile-selection-changed", { item: { id, name, kind, path, text, color }, level })
+    const { id, name, kind, path, text, color, emoji } = item;
+    await emitTo("editor", "tile-selection-changed", { item: { id, name, kind, path, text, color, emoji }, level })
       .catch((error) => showToast(String(error), true));
     return;
   }
@@ -1296,7 +1297,13 @@ async function addDroppedPaths(paths: string[], target: DropTarget | null) {
 }
 
 function tileValueFields(kind: EditableTileKind, id: string) {
-  if (kind === "submenu") return "";
+  if (kind === "submenu") return `
+    <label for="${id}">Emoji icon <small class="tile-name-hint">(Optional)</small></label>
+    <div class="tile-path-row">
+      <input id="${id}" class="tile-emoji-input" name="value" type="text" autocomplete="off" spellcheck="false" aria-describedby="${id}-emoji-help" />
+      <button class="tile-browse tile-emoji-picker" type="button">Pick emoji</button>
+    </div>
+    <p id="${id}-emoji-help">Press Win + . in the field to open the Windows emoji picker.</p>`;
   if (kind === "text") return `
     <label for="${id}">Text to copy</label>
     <textarea id="${id}" name="value" rows="5" placeholder="Type or paste text here" required></textarea>`;
@@ -1346,6 +1353,24 @@ function bindTileValueFields(form: HTMLFormElement, fields: HTMLElement, kind: E
     }).catch(() => {
       appSearch.placeholder = "Browse or paste an app path below";
     });
+  }
+  if (kind === "submenu" && value instanceof HTMLInputElement) {
+    const graphemes = new Intl.Segmenter();
+    value.addEventListener("input", () => {
+      const emoji = value.value.trim();
+      const valid = !emoji || (Array.from(graphemes.segment(emoji)).length === 1 && /[\p{Extended_Pictographic}\p{Emoji_Presentation}\u20e3]/u.test(emoji));
+      value.setCustomValidity(valid ? "" : "Choose one emoji for the submenu icon.");
+    });
+    fields.querySelector<HTMLButtonElement>(".tile-emoji-picker")!.addEventListener("click", () => {
+      const error = form.querySelector<HTMLElement>(".tile-form-error")!;
+      error.textContent = "";
+      value.focus();
+      value.select();
+      void invoke("open_emoji_picker").catch((failure) => {
+        if (value.isConnected) error.textContent = String(failure);
+      });
+    });
+    return value;
   }
   fields.querySelector<HTMLButtonElement>(".tile-browse")?.addEventListener("click", async () => {
     try {
@@ -1500,11 +1525,11 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
   const { item } = selection;
   const selectedColor = bindTileColor(form, item.color);
   let kind = editableKind(item.kind);
-  app.querySelector<HTMLElement>("[data-selection-name]")!.textContent = item.kind === "text"
+  app.querySelector<HTMLElement>("[data-selection-name]")!.textContent = item.kind === "text" || item.kind === "submenu"
     ? shortcutName(item)
     : item.name || tileDefinitions.find((tile) => tile.kind === kind)?.label || "File";
   const selectionKind = app.querySelector<HTMLElement>("[data-selection-kind]")!;
-  const values = new Map<EditableTileKind, string>([[kind, kind === "text" ? item.text ?? "" : item.path]]);
+  const values = new Map<EditableTileKind, string>([[kind, kind === "text" ? item.text ?? "" : kind === "submenu" ? item.emoji ?? "" : item.path]]);
   let value: HTMLInputElement | HTMLTextAreaElement | null;
   const renderFields = () => {
     selectionKind.textContent = type.selectedOptions[0]?.textContent ?? "";
@@ -1514,7 +1539,10 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
     name.placeholder = hint ? "" : "Optional name";
     fields.innerHTML = tileValueFields(kind, "edit-tile-value");
     value = bindTileValueFields(form, fields, kind, false);
-    if (value) value.value = values.get(kind) ?? "";
+    if (value) {
+      value.value = values.get(kind) ?? "";
+      if (kind === "submenu") value.dispatchEvent(new Event("input"));
+    }
   };
   name.value = item.name;
   type.value = kind;
@@ -1870,7 +1898,7 @@ function renderEditor() {
         save.disabled = false;
       }
     });
-    (valueField ?? nameField).focus();
+    (tileForm.kind === "submenu" ? nameField : valueField ?? nameField).focus();
   }
   observeEditorHeight();
 }

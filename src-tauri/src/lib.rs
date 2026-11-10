@@ -24,6 +24,8 @@ use walkdir::WalkDir;
 
 #[cfg(target_os = "windows")]
 mod folder_launch;
+#[cfg(target_os = "windows")]
+mod keyboard;
 mod mouse_hotkey;
 mod tile_icons;
 
@@ -43,6 +45,8 @@ struct Shortcut {
     parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    emoji: Option<String>,
 }
 
 #[derive(Default)]
@@ -477,6 +481,7 @@ fn create_tile(
         return Err("Enter a name for the folder tile".into());
     }
     let (path, text, name) = tile_fields(&kind, &name, &value)?;
+    let emoji = submenu_emoji(&kind, &value)?;
     let item = Shortcut {
         id: next_shortcut_id()?,
         path,
@@ -486,6 +491,7 @@ fn create_tile(
         text,
         parent_id: parent_id.clone(),
         color: tile_color(color)?,
+        emoji,
     };
     let mut updated = shortcuts.clone();
     let position = sibling_insert_position(&updated, parent_id.as_deref(), index);
@@ -520,13 +526,27 @@ fn tile_color(color: Option<String>) -> Result<Option<String>, String> {
     }
 }
 
+fn submenu_emoji(kind: &str, value: &str) -> Result<Option<String>, String> {
+    let value = value.trim();
+    if kind != "submenu" || value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > 128 || value.chars().any(char::is_control) {
+        return Err("Choose one emoji for the submenu icon".into());
+    }
+    Ok(Some(value.to_string()))
+}
+
 fn tile_fields(
     kind: &str,
     name: &str,
     value: &str,
 ) -> Result<(String, Option<String>, String), String> {
     let (path, text, default_name) = match kind {
-        "submenu" => (String::new(), None, "Submenu".to_string()),
+        "submenu" => {
+            let default_name = if value.trim().is_empty() { "Submenu" } else { "" };
+            (String::new(), None, default_name.to_string())
+        }
         "text" => {
             if value.is_empty() || value.chars().count() > 20_000 {
                 return Err("Enter text up to 20,000 characters".into());
@@ -575,6 +595,7 @@ fn edited_tile(
         return Err("Submenus are limited to three rings".into());
     }
     let mut item = existing.clone();
+    item.emoji = submenu_emoji(kind, value)?;
     if kind == "file" {
         let path = Path::new(value.trim().trim_matches('"'));
         if !path.is_absolute() {
@@ -673,6 +694,33 @@ fn reorder_tile(
         *shortcuts = updated;
     }
     Ok(shortcuts.clone())
+}
+
+#[tauri::command]
+fn open_emoji_picker(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::{
+            Input::KeyboardAndMouse::{VK_LWIN, VK_OEM_PERIOD},
+            WindowsAndMessaging::GetForegroundWindow,
+        };
+
+        let editor = app
+            .get_webview_window("editor")
+            .ok_or_else(|| "Settings window not found".to_string())?;
+        let hwnd = editor.hwnd().map_err(|error| error.to_string())?;
+        if unsafe { GetForegroundWindow() }.0 == hwnd.0
+            && keyboard::send_shortcut(VK_LWIN, VK_OEM_PERIOD)
+        {
+            return Ok(());
+        }
+        Err("Focus the emoji field and press Win + . to open the emoji picker.".into())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("Use your system emoji picker in the emoji field.".into())
+    }
 }
 
 #[tauri::command]
@@ -896,6 +944,7 @@ fn add_paths(
             text: None,
             parent_id: parent_id.clone(),
             color: None,
+            emoji: None,
         };
         let insert_at = sibling_insert_position(
             &updated,
@@ -1386,6 +1435,7 @@ pub fn run() {
             update_tile,
             reorder_tile,
             pick_tile_path,
+            open_emoji_picker,
             list_installed_apps,
             begin_tile_drag,
             end_tile_drag,
@@ -1420,6 +1470,7 @@ mod tests {
         assert!(shortcuts[0].text.is_none());
         assert!(shortcuts[0].parent_id.is_none());
         assert!(shortcuts[0].color.is_none());
+        assert!(shortcuts[0].emoji.is_none());
         assert!(tile_color(Some("red".into())).is_err());
         assert_eq!(
             tile_color(Some("sky-500".into())).unwrap().as_deref(),
@@ -1451,6 +1502,7 @@ mod tests {
             text: None,
             parent_id: parent_id.map(str::to_string),
             color: None,
+            emoji: None,
         };
         let mut items = vec![
             item("root", "submenu", None),
@@ -1462,6 +1514,15 @@ mod tests {
         assert_eq!(parent_depth(&items, Some("child-a")).unwrap(), 2);
         assert_eq!(sibling_count(&items, Some("root")), 2);
         assert_eq!(sibling_insert_position(&items, Some("root"), 1), 3);
+        let emoji_only = edited_tile(&items, &items[0], "submenu", "", "🗂️").unwrap();
+        assert!(emoji_only.name.is_empty());
+        assert_eq!(emoji_only.emoji.as_deref(), Some("🗂️"));
+        let combined = edited_tile(&items, &emoji_only, "submenu", "Projects", "🗂️").unwrap();
+        assert_eq!(combined.name, "Projects");
+        assert_eq!(combined.emoji.as_deref(), Some("🗂️"));
+        let name_only = edited_tile(&items, &combined, "submenu", "Projects", "").unwrap();
+        assert_eq!(name_only.name, "Projects");
+        assert!(name_only.emoji.is_none());
         assert!(edited_tile(&items, &items[0], "text", "Root", "Example").is_err());
         assert!(edited_tile(&items, &items[2], "submenu", "Nested", "").is_err());
 

@@ -311,6 +311,14 @@ button { font: inherit; }
 
 .shortcut.single-content { justify-content: center; }
 
+.submenu-emoji {
+  font-family: "Segoe UI Emoji", sans-serif;
+  font-size: calc(32px * var(--content-scale, 1));
+  line-height: 1.1;
+}
+
+.child-shortcut .submenu-emoji { font-size: calc(28px * var(--content-scale, 1)); }
+
 .child-shortcut {
   width: calc(72px * var(--content-scale, 1));
   min-height: calc(76px * var(--content-scale, 1));
@@ -763,6 +771,7 @@ button.tile-color-swatch, .tile-shade { cursor: pointer; }
 .tile-form textarea { min-height: 104px; resize: vertical; }
 .tile-path-row { display: flex; gap: 7px; }
 .tile-path-row input { flex: 1; }
+.tile-form .tile-emoji-input { font-family: "Segoe UI Emoji", sans-serif; font-size: 18px; }
 
 .tile-browse, .tile-cancel, .tile-save {
   padding: 8px 12px;
