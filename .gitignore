@@ -1,0 +1,7 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/target-refresh/
+src-tauri/target-islands/
+artifacts/
+*.log

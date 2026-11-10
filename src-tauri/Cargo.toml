@@ -1,0 +1,43 @@
+[package]
+name = "radial-palette"
+version = "0.1.0"
+description = "A desktop palette for file and folder shortcuts"
+authors = ["Radial Palette"]
+edition = "2021"
+
+[lib]
+name = "radial_palette_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+arboard = "3"
+url = "2"
+walkdir = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+dom_query = "0.28"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+png = "0.18"
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Imaging",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
