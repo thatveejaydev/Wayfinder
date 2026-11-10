@@ -89,7 +89,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const CENTER = 310;
 const OUTER = 231;
 const MAX_ITEMS = 12;
-const RECENT_SHORTCUTS_KEY = "radial.recent-shortcuts";
+const RECENT_SHORTCUTS_KEY = "wayfinder.recent-shortcuts";
 const MAX_RECENT_SHORTCUTS = 100;
 
 let shortcuts: Shortcut[] = [];
@@ -1046,7 +1046,7 @@ function render(transition?: "opening" | "search") {
   const emptyWidth = OUTER - appearance.innerRadius;
   const stageMarkup = `
     <main class="stage ${dragging ? "is-dragging" : ""} ${editing ? "is-editing" : ""}">
-      <div class="palette" aria-label="Radial shortcut palette">
+      <div class="palette" aria-label="Wayfinder shortcut palette">
         <svg class="ring-svg" viewBox="0 0 620 620" aria-hidden="true">
           ${roots.length ? "" : `<circle class="ring-empty" cx="310" cy="310" r="${emptyRadius}" stroke-width="${emptyWidth}" />`}
           <g class="ring-segments"></g>
@@ -1498,7 +1498,7 @@ function renderEditor() {
           <input id="palette-cast-shadow" class="setting-switch" type="checkbox" role="switch" ${appearance.castShadow ? "checked" : ""} />
         </label>
       </div>` : `<div id="about-panel" role="tabpanel" aria-label="About">
-        <header class="settings-heading"><h1>About Radial</h1></header>
+        <header class="settings-heading"><h1>About Wayfinder</h1></header>
         <dl class="about-details">
           <div class="setting-row"><dt>Version</dt><dd>${appVersion}</dd></div>
           <div class="setting-row"><dt>Author</dt><dd>Vee Jay</dd></div>
@@ -1625,8 +1625,8 @@ function renderEditor() {
   app.querySelectorAll<HTMLButtonElement>(".tile-source").forEach((source) => {
     const kind = source.dataset.kind as TileKind;
     source.addEventListener("dragstart", (event) => {
-      event.dataTransfer?.setData("application/x-radial-tile", kind);
-      event.dataTransfer?.setData("text/plain", `radial-tile:${kind}`);
+      event.dataTransfer?.setData("application/x-wayfinder-tile", kind);
+      event.dataTransfer?.setData("text/plain", `wayfinder-tile:${kind}`);
       if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
       void invoke("begin_tile_drag", { kind });
     });
@@ -1898,7 +1898,7 @@ async function start() {
       }
     });
     document.addEventListener("dragover", (event) => {
-      if (!incomingTileKind && !Array.from(event.dataTransfer?.types ?? []).includes("application/x-radial-tile")) return;
+      if (!incomingTileKind && !Array.from(event.dataTransfer?.types ?? []).includes("application/x-wayfinder-tile")) return;
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
       previewDropAt(event.clientX, event.clientY);
@@ -1906,8 +1906,8 @@ async function start() {
     document.addEventListener("drop", (event) => {
       if (externalDragging) return;
       const fallback = event.dataTransfer?.getData("text/plain") ?? "";
-      const raw = event.dataTransfer?.getData("application/x-radial-tile")
-        || (fallback.startsWith("radial-tile:") ? fallback.slice("radial-tile:".length) : "");
+      const raw = event.dataTransfer?.getData("application/x-wayfinder-tile")
+        || (fallback.startsWith("wayfinder-tile:") ? fallback.slice("wayfinder-tile:".length) : "");
       const kind = tileDefinitions.find((item) => item.kind === raw)?.kind ?? incomingTileKind;
       if (!kind) return;
       event.preventDefault();

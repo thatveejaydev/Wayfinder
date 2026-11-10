@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -89,7 +90,7 @@ const MAX_PREVIEW_BYTES: u64 = 3 * 1024 * 1024;
 
 #[cfg(all(debug_assertions, target_os = "windows"))]
 fn watch_dev_supervisor(app: AppHandle) {
-    let Ok(pid) = std::env::var("RADIAL_DEV_SUPERVISOR_PID") else {
+    let Ok(pid) = std::env::var("WAYFINDER_DEV_SUPERVISOR_PID") else {
         return;
     };
     let Ok(pid) = pid.parse::<u32>() else {
@@ -220,6 +221,40 @@ impl Appearance {
         }
         self
     }
+}
+
+fn import_previous_data(dir: &Path) -> io::Result<()> {
+    let Some(parent) = dir.parent() else {
+        return Ok(());
+    };
+    let legacy_dir = parent.join("app.radial.palette");
+    for name in ["shortcuts.json", "appearance.json", "palette-hotkey.txt"] {
+        let destination = dir.join(name);
+        if destination.try_exists()? {
+            continue;
+        }
+        let contents = match fs::read(legacy_dir.join(name)) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        fs::create_dir_all(dir)?;
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = file.write_all(&contents) {
+            drop(file);
+            let _ = fs::remove_file(&destination);
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn appearance_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1204,6 +1239,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            import_previous_data(&app.path().app_data_dir()?)?;
             #[cfg(all(debug_assertions, target_os = "windows"))]
             watch_dev_supervisor(app.handle().clone());
             let shortcuts = load_shortcuts(app.handle());
@@ -1268,7 +1304,7 @@ pub fn run() {
             open_tile_form
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run Radial Palette");
+        .expect("failed to run Wayfinder");
 }
 
 #[cfg(test)]

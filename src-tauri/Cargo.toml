@@ -1,12 +1,12 @@
 [package]
-name = "radial-palette"
+name = "wayfinder"
 version = "0.1.0"
 description = "A desktop palette for file and folder shortcuts"
-authors = ["Radial Palette"]
+authors = ["Vee Jay"]
 edition = "2021"
 
 [lib]
-name = "radial_palette_lib"
+name = "wayfinder_lib"
 crate-type = ["rlib"]
 
 [build-dependencies]

@@ -8,7 +8,7 @@ const dev = args[0] === "dev";
 const child = spawn(process.execPath, [cli, ...args], {
   stdio: "inherit",
   env: dev
-    ? { ...process.env, RADIAL_DEV_SUPERVISOR_PID: String(process.pid) }
+    ? { ...process.env, WAYFINDER_DEV_SUPERVISOR_PID: String(process.pid) }
     : process.env,
 });
 
