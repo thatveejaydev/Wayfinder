@@ -176,6 +176,8 @@ impl Default for Theme {
 #[serde(rename_all = "camelCase")]
 struct Appearance {
     shell_size: u32,
+    #[serde(default = "default_icon_size")]
+    icon_size: u32,
     text_size: u32,
     inner_radius: u32,
     border_thickness: u32,
@@ -208,10 +210,15 @@ fn default_color_label_distance() -> u32 {
     7
 }
 
+fn default_icon_size() -> u32 {
+    42
+}
+
 impl Default for Appearance {
     fn default() -> Self {
         Self {
             shell_size: 620,
+            icon_size: default_icon_size(),
             text_size: 9,
             inner_radius: 144,
             border_thickness: 2,
@@ -230,6 +237,7 @@ impl Default for Appearance {
 impl Appearance {
     fn clamped(mut self) -> Self {
         self.shell_size = self.shell_size.clamp(360, 760);
+        self.icon_size = self.icon_size.clamp(20, 60);
         self.text_size = self.text_size.clamp(8, 18);
         self.inner_radius = self.inner_radius.clamp(60, 156);
         self.border_thickness = self.border_thickness.clamp(0, 6);
@@ -865,6 +873,49 @@ fn end_tile_drag(app: AppHandle, state: State<'_, Mutex<DragSession>>) -> Result
 }
 
 #[tauri::command]
+fn select_tile_for_edit(
+    app: AppHandle,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
+    id: String,
+    level: u8,
+) -> Result<(), String> {
+    let editor = app
+        .get_webview_window("editor")
+        .ok_or_else(|| "Edit window not found".to_string())?;
+    if !editor.is_visible().map_err(|error| error.to_string())? {
+        return Ok(());
+    }
+    let payload = {
+        let store = state.lock().map_err(|error| error.to_string())?;
+        let item = store
+            .edit_shortcuts(&workspace_id)?
+            .iter()
+            .find(|item| item.id == id)
+            .ok_or("Shortcut not found")?;
+        serde_json::json!({
+            "item": {
+                "id": item.id,
+                "name": item.name,
+                "kind": item.kind,
+                "path": item.path,
+                "text": item.text,
+                "color": item.color,
+                "emoji": item.emoji,
+            },
+            "level": level,
+            "workspaceId": workspace_id,
+        })
+    };
+    app.emit_to("editor", "tile-selection-changed", payload)
+        .map_err(|error| error.to_string())?;
+    if editor.is_minimized().map_err(|error| error.to_string())? {
+        editor.unminimize().map_err(|error| error.to_string())?;
+    }
+    editor.set_focus().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn open_tile_form(
     app: AppHandle,
     workspace_id: String,
@@ -997,14 +1048,14 @@ fn remove_shortcut(
     state: State<'_, Mutex<WorkspaceStore>>,
     workspace_id: String,
     id: String,
-) -> Result<(), String> {
+    confirmed_descendants: Option<usize>,
+) -> Result<Option<usize>, String> {
     let mut store = state.lock().map_err(|e| e.to_string())?;
     let shortcuts = store.edit_shortcuts(&workspace_id)?;
-    let mut updated = shortcuts.clone();
     let mut removed = HashSet::from([id]);
     loop {
         let before = removed.len();
-        for item in &updated {
+        for item in shortcuts.iter() {
             if item
                 .parent_id
                 .as_ref()
@@ -1017,9 +1068,14 @@ fn remove_shortcut(
             break;
         }
     }
+    let descendants = removed.len() - 1;
+    if descendants > 0 && confirmed_descendants != Some(descendants) {
+        return Ok(Some(descendants));
+    }
+    let mut updated = shortcuts.clone();
     updated.retain(|item| !removed.contains(&item.id));
     store.save_shortcuts(&app, &workspace_id, updated)?;
-    Ok(())
+    Ok(None)
 }
 
 #[tauri::command]
@@ -1536,6 +1592,7 @@ pub fn run() {
             list_installed_apps,
             begin_tile_drag,
             end_tile_drag,
+            select_tile_for_edit,
             open_tile_form
         ])
         .run(tauri::generate_context!())
@@ -1551,6 +1608,7 @@ mod tests {
         let old = r#"{"shellSize":480,"textSize":10,"innerRadius":110,"borderThickness":1,"tilePadding":5,"submenuPadding":12}"#;
         let appearance: Appearance = serde_json::from_str(old).unwrap();
         assert_eq!(appearance.shell_size, 480);
+        assert_eq!(appearance.icon_size, 42);
         assert_eq!(appearance.inner_radius, 110);
         assert_eq!(appearance.tile_corner_radius, 0);
         assert_eq!(appearance.color_label_distance, 7);

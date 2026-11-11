@@ -13,7 +13,7 @@ Stopping `npm run tauri dev` also exits its development app and removes its tray
 
 On Windows, Wayfinder stores shortcuts, appearance settings, and the palette hotkey in `%APPDATA%\app.wayfinder.palette`. On startup it imports any missing files from the previous app data folder.
 
-Drag files or folders from Explorer onto the circular window. The palette saves their paths in its app data directory and leaves the originals untouched. Open **Settings** from the tray menu to enter edit mode. Click a tile to open the Edit Tile tab, drag it to another position in its ring, or click its × badge to remove it. Up to 12 shortcuts fit on each ring.
+Drag files or folders from Explorer onto the circular window. The palette saves their paths in its app data directory and leaves the originals untouched. Open **Settings** from the tray menu to enter edit mode. Click a tile to open the **Edit tile** tab, where you can edit it or choose **Remove tile**. You can also drag a tile to another position in its ring. Up to 12 shortcuts fit on each ring.
 
 Selecting a shortcut hides the floating palette immediately. The spaces between occupied ring slices are transparent.
 On Windows, selecting a running app brings it forward. If it was already in front when you opened the palette, selecting it minimizes that window.

@@ -45,7 +45,7 @@ const tileNameHints: Partial<Record<EditableTileKind, string>> = {
   webpage: "(Leave blank for icon only)",
 };
 type TileSelection = { item: Omit<Shortcut, "preview">; level: number; workspaceId: string };
-type EditorTab = "tiles" | "edit-tile" | "workspace" | "appearance" | "theme" | "misc" | "about";
+type EditorTab = "tiles" | "edit-tile" | "workspace" | "appearance" | "misc" | "about";
 type Workspace = { id: string; name: string; icon: string };
 type WorkspaceList = { revision: number; activeId: string; workspaces: Workspace[] };
 type WorkspacePalette = WorkspaceList & { shortcuts: Shortcut[] };
@@ -90,6 +90,7 @@ const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
 
 type Appearance = {
   shellSize: number;
+  iconSize: number;
   textSize: number;
   innerRadius: number;
   borderThickness: number;
@@ -107,6 +108,7 @@ type AppearanceKey = Exclude<keyof Appearance, "theme" | "animations" | "openAtS
 
 const sliderDefinitions: { key: AppearanceKey; label: string; min: number; max: number; group: "Geometry" | "Spacing" }[] = [
   { key: "shellSize", label: "Tile size", min: 360, max: 760, group: "Geometry" },
+  { key: "iconSize", label: "Icon size", min: 20, max: 60, group: "Geometry" },
   { key: "textSize", label: "Text size", min: 8, max: 18, group: "Geometry" },
   { key: "innerRadius", label: "Center opening", min: 60, max: 156, group: "Geometry" },
   { key: "borderThickness", label: "Border thickness", min: 0, max: 6, group: "Geometry" },
@@ -118,6 +120,7 @@ const sliderDefinitions: { key: AppearanceKey; label: string; min: number; max: 
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 const isEditorWindow = new URLSearchParams(window.location.search).get("editor") === "1";
+const settingsNotification = document.createElement("div");
 const SVG_NS = "http://www.w3.org/2000/svg";
 const CENTER = 310;
 const OUTER = 231;
@@ -126,6 +129,7 @@ const MAX_ITEMS = 12;
 const MIN_SUBMENU_SPAN = 54;
 const RECENT_SHORTCUTS_KEY = "wayfinder.recent-shortcuts";
 const MAX_RECENT_SHORTCUTS = 100;
+const DEFAULT_ICON_SIZE = 42;
 
 let shortcuts: Shortcut[] = [];
 let workspaceList: WorkspaceList = { revision: -1, activeId: "", workspaces: [] };
@@ -162,6 +166,7 @@ let childLayoutAnimations = [0, 0, 0];
 let tileDropHandled = false;
 let busy = false;
 let toastTimer = 0;
+let settingsNotificationTimer = 0;
 let saveTimer = 0;
 let saveQueue = Promise.resolve();
 let editorTab: EditorTab = "tiles";
@@ -175,6 +180,7 @@ let tileReorder: TileReorder | null = null;
 let suppressTileClick = false;
 let appearance: Appearance = {
   shellSize: 620,
+  iconSize: DEFAULT_ICON_SIZE,
   textSize: 9,
   innerRadius: 144,
   borderThickness: 2,
@@ -192,6 +198,7 @@ function applyPreferences() {
   const { theme } = appearance;
   const mode = theme.mode === "system" ? (systemTheme.matches ? "dark" : "light") : theme.mode;
   const root = document.documentElement;
+  root.style.setProperty("--tile-icon-scale", String(appearance.iconSize / DEFAULT_ICON_SIZE));
   root.toggleAttribute("data-no-animations", !appearance.animations);
   root.toggleAttribute("data-cast-shadow", appearance.castShadow);
   root.dataset.theme = mode;
@@ -595,6 +602,14 @@ function showToast(message: string, isError = false) {
   toastTimer = window.setTimeout(() => node.classList.remove("visible"), 3200);
 }
 
+function showSettingsNotification(message: string, isError = false) {
+  settingsNotification.textContent = message;
+  settingsNotification.classList.toggle("error", isError);
+  settingsNotification.classList.add("visible");
+  window.clearTimeout(settingsNotificationTimer);
+  settingsNotificationTimer = window.setTimeout(() => settingsNotification.classList.remove("visible"), 3200);
+}
+
 function palettePosition(clientX: number, clientY: number) {
   const palette = app.querySelector<HTMLElement>(".palette");
   if (!palette) return null;
@@ -864,7 +879,6 @@ type TileReorder = {
 
 function prepareTileReorder(event: PointerEvent, item: Shortcut, level: TileReorder["level"], path: SVGGElement, button: HTMLButtonElement) {
   if (!editing || busy || incomingTileKind || tileReorder || event.button !== 0 || !event.isPrimary) return;
-  if ((event.target as Element).closest(".remove-badge")) return;
   const parentId = item.parentId ?? null;
   const siblings = childrenOf(parentId);
   if (siblings.length < 2) return;
@@ -1146,13 +1160,10 @@ function appendTile(
       : icon(item.kind);
     tileIcon = `<span class="shortcut-icon ${item.kind}">${thumbnail}</span>`;
   }
-  const removeBadge = editing && !draft && !searching && !previewWorkspaceId ? `<span class="remove-badge" title="Remove">
-    <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3L3 9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-  </span>` : "";
   const draftHasValue = draft && Boolean(item.path || item.emoji || item.text);
   if (draft && !draftHasValue) tileIcon = "";
   const showLabel = item.name || (draft ? draftHasValue && !item.emoji : item.kind === "text" || searching);
-  button.innerHTML = `${tileIcon}${showLabel ? '<span class="shortcut-label"></span>' : ""}${result ? '<span class="shortcut-workspace"></span>' : ""}${removeBadge}`;
+  button.innerHTML = `${tileIcon}${showLabel ? '<span class="shortcut-label"></span>' : ""}${result ? '<span class="shortcut-workspace"></span>' : ""}`;
   if (emoji) button.querySelector<HTMLElement>(".submenu-emoji")!.textContent = emoji;
   if (result) button.querySelector<HTMLElement>(".shortcut-workspace")!.textContent = result.workspace.name;
   if (!draft && !item.preview && (item.kind === "app" || item.kind === "webpage")) {
@@ -1180,10 +1191,7 @@ function appendTile(
       path.addEventListener("pointerdown", prepareReorder);
       button.addEventListener("pointerdown", prepareReorder);
     }
-    button.addEventListener("click", (event) => {
-      if (editing && (event.target as Element).closest(".remove-badge")) void removeItem(createdEntry.item);
-      else void activate(createdEntry.item, createdEntry.level, event.shiftKey, workspaceId);
-    });
+    button.addEventListener("click", (event) => activate(createdEntry.item, createdEntry.level, event.shiftKey, workspaceId));
   }
   button.addEventListener("pointerenter", () => {
     path.classList.add("hovered");
@@ -1549,21 +1557,6 @@ function render(transition?: "opening" | "search" | "workspace-preview") {
   if (transition !== "workspace-preview") renderWorkspacePicker();
 }
 
-async function removeItem(item: Shortcut) {
-  if (busy) return;
-  busy = true;
-  try {
-    const workspaceId = workspaceList.activeId;
-    await invoke("remove_shortcut", { id: item.id, workspaceId });
-    await refreshWorkspacePalette();
-    showToast(`Removed ${shortcutName(item)}`);
-  } catch (error) {
-    showToast(String(error), true);
-  } finally {
-    busy = false;
-  }
-}
-
 function resetEditSelection() {
   activeSubmenus = [];
   selectedTileId = null;
@@ -1591,8 +1584,7 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean, worksp
     selectedTileId = item.id;
     if (item.kind !== "submenu") activeSubmenus = activeSubmenus.slice(0, level);
     if (!openSubmenu(item, level)) render();
-    const { id, name, kind, path, text, color, emoji } = item;
-    await emitTo("editor", "tile-selection-changed", { item: { id, name, kind, path, text, color, emoji }, level, workspaceId })
+    await invoke("select_tile_for_edit", { id: item.id, level, workspaceId })
       .catch((error) => showToast(String(error), true));
     return;
   }
@@ -1835,14 +1827,13 @@ const settingsIconPaths = {
   "edit-tile": "m13.5 6.5 4 4M4 20l4.5-1 11-11a2.8 2.8 0 0 0-4-4l-11 11L4 20z",
   workspace: "M3 7h18v13H3zM8 7V4h8v3M3 12h18m-11 0v2h4v-2",
   appearance: "M3 6h5m4 0h9M3 12h9m4 0h5M3 18h3m4 0h11M8 4v4m8 2v4M6 16v4",
-  theme: "M12 3a9 9 0 1 0 0 18h1.5a1.5 1.5 0 0 0 1.1-2.5 1.5 1.5 0 0 1 1.1-2.5H18a3 3 0 0 0 3-3c0-5.5-4-10-9-10zM7.5 12h.01m2-4h.01m4-.5h.01m3.5 3h.01",
   misc: "M9 7v10a2 2 0 1 1-2-2h10a2 2 0 1 1-2 2V7a2 2 0 1 1 2 2H7a2 2 0 1 1 2-2z",
   submenu: "m6 6 6 6-6 6m6-12 6 6-6 6",
   text: "M4 6h16M4 10h12M4 14h16M4 18h12",
   folder: "M3 6a2 2 0 0 1 2-2h4l3 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   webpage: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3a13 13 0 0 0 0 18 13 13 0 0 0 0-18z",
   app: "M3 5h18v14H3zM3 9h18m-14-2h.01m3 0h.01",
-  selection: "m4 3 6 17 3-7 7-3L4 3z",
+  file: "M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6",
   grip: "M9 5h.01m6 0h.01M9 12h.01m6 0h.01M9 19h.01m6 0h.01",
 };
 
@@ -1858,7 +1849,7 @@ function selectedTileForm(selection: TileSelection) {
   const types = [...tileDefinitions, { kind: "file", label: "File" }];
   return `
     <div class="tile-selection-summary">
-      <span class="tile-source-icon">${settingsIcon("selection")}</span>
+      <span class="tile-source-icon" data-selection-icon></span>
       <span class="tile-source-copy"><strong data-selection-name></strong><small data-selection-kind></small></span>
     </div>
     <form id="tile-edit-form" class="tile-form tile-edit-form" aria-label="Selected tile">
@@ -1871,7 +1862,17 @@ function selectedTileForm(selection: TileSelection) {
       <div class="tile-fields"></div>
       ${tileColorField()}
       <div class="tile-form-error" role="alert"></div>
-      <div class="tile-form-actions"><button class="tile-save" type="submit">Save changes</button></div>
+      <div class="tile-form-actions tile-edit-actions">
+        <button class="tile-remove" type="button">Remove tile</button>
+        <button class="tile-save" type="submit">Save changes</button>
+      </div>
+      <div class="tile-remove-confirmation" role="group" aria-label="Confirm tile removal" hidden>
+        <p id="tile-remove-message"></p>
+        <div class="tile-form-actions">
+          <button class="tile-cancel" type="button" aria-describedby="tile-remove-message">Cancel</button>
+          <button class="tile-remove" type="button">Remove submenu</button>
+        </div>
+      </div>
     </form>`;
 }
 
@@ -1882,6 +1883,12 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
   const fields = form.querySelector<HTMLElement>(".tile-fields")!;
   const error = form.querySelector<HTMLElement>(".tile-form-error")!;
   const save = form.querySelector<HTMLButtonElement>(".tile-save")!;
+  const actions = form.querySelector<HTMLElement>(".tile-edit-actions")!;
+  const remove = actions.querySelector<HTMLButtonElement>(".tile-remove")!;
+  const confirmation = form.querySelector<HTMLElement>(".tile-remove-confirmation")!;
+  const cancelRemove = confirmation.querySelector<HTMLButtonElement>(".tile-cancel")!;
+  const confirmRemove = confirmation.querySelector<HTMLButtonElement>(".tile-remove")!;
+  const removeMessage = confirmation.querySelector<HTMLElement>("#tile-remove-message")!;
   const { item } = selection;
   const selectedColor = bindTileColor(form, item.color);
   let kind = editableKind(item.kind);
@@ -1889,10 +1896,13 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
     ? shortcutName(item)
     : item.name || tileDefinitions.find((tile) => tile.kind === kind)?.label || "File";
   const selectionKind = app.querySelector<HTMLElement>("[data-selection-kind]")!;
+  const selectionIcon = app.querySelector<HTMLElement>("[data-selection-icon]")!;
   const values = new Map<EditableTileKind, string>([[kind, kind === "text" ? item.text ?? "" : kind === "submenu" ? item.emoji ?? "" : item.path]]);
   let value: HTMLInputElement | HTMLTextAreaElement | null;
   const renderFields = () => {
     selectionKind.textContent = type.selectedOptions[0]?.textContent ?? "";
+    selectionIcon.dataset.kind = kind;
+    selectionIcon.innerHTML = settingsIcon(kind);
     const hint = tileNameHints[kind];
     nameHint.textContent = hint ?? "";
     nameHint.hidden = !hint;
@@ -1913,23 +1923,69 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
     error.textContent = "";
     renderFields();
   });
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const details = { id: item.id, workspaceId: selection.workspaceId, kind, name: name.value, value: value?.value ?? "", color: selectedColor() };
+  const disableControls = () => {
     const controls = form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>(":is(input, textarea, select, button):enabled");
     controls.forEach((control) => { control.disabled = true; });
+    return () => controls.forEach((control) => { control.disabled = false; });
+  };
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (save.disabled || !confirmation.hidden) return;
+    const details = { id: item.id, workspaceId: selection.workspaceId, kind, name: name.value, value: value?.value ?? "", color: selectedColor() };
+    const restoreControls = disableControls();
     error.textContent = "";
     try {
       const updated = await invoke<Shortcut>("update_tile", details);
       if (selectedTile !== selection) return;
       selectedTile = { ...selection, item: updated };
       renderEditor();
-      app.querySelector<HTMLElement>(".settings-status")!.textContent = "Tile updated";
+      showSettingsNotification("Tile updated");
     } catch (failure) {
       error.textContent = String(failure);
-      controls.forEach((control) => { control.disabled = false; });
+      restoreControls();
       save.focus();
     }
+  });
+  let descendantCount: number | undefined;
+  const removeSelectedTile = async (confirmedDescendants?: number) => {
+    if (remove.disabled || selectedTile !== selection) return;
+    const restoreControls = disableControls();
+    error.textContent = "";
+    try {
+      const count = await invoke<number | null>("remove_shortcut", {
+        id: item.id, workspaceId: selection.workspaceId, confirmedDescendants,
+      });
+      if (count !== null) {
+        if (!form.isConnected || selectedTile !== selection) return;
+        descendantCount = count;
+        removeMessage.textContent = `Remove ${shortcutName(item)} and its ${count} ${count === 1 ? "tile" : "tiles"}?`;
+        actions.hidden = true;
+        confirmation.hidden = false;
+        restoreControls();
+        cancelRemove.focus();
+        return;
+      }
+      if (selectedTile === selection) {
+        selectedTile = null;
+        renderEditor();
+      }
+      showSettingsNotification(`Removed ${shortcutName(item)}`);
+      if (!selectedTile && editorTab === "edit-tile" && workspaceList.activeId === selection.workspaceId) {
+        app.querySelector<HTMLButtonElement>('[data-tab="edit-tile"]')?.focus({ preventScroll: true });
+      }
+    } catch (failure) {
+      restoreControls();
+      error.textContent = String(failure);
+      (confirmation.hidden ? remove : confirmRemove).focus();
+    }
+  };
+  remove.addEventListener("click", () => void removeSelectedTile());
+  confirmRemove.addEventListener("click", () => void removeSelectedTile(descendantCount));
+  cancelRemove.addEventListener("click", () => {
+    confirmation.hidden = true;
+    actions.hidden = false;
+    error.textContent = "";
+    remove.focus();
   });
 }
 
@@ -2034,7 +2090,6 @@ function applyEditorWorkspaces(next: WorkspaceList) {
 }
 
 function bindWorkspaceSettings(panel: HTMLElement) {
-  const status = () => app.querySelector<HTMLElement>(".settings-status")!;
   const add = panel.querySelector<HTMLButtonElement>("#workspace-add")!;
   const report = async (change: WorkspaceChange, message: string) => {
     if (workspaceChanging) return;
@@ -2054,10 +2109,11 @@ function bindWorkspaceSettings(panel: HTMLElement) {
           ?? app.querySelector<HTMLButtonElement>("#workspace-add");
         focus?.focus();
       }
-      status().textContent = message;
+      showSettingsNotification(message);
     } catch (error) {
       const formError = app.querySelector<HTMLElement>("#workspace-form .tile-form-error");
-      (formError ?? status()).textContent = String(error);
+      if (formError) formError.textContent = String(error);
+      else showSettingsNotification(String(error), true);
     } finally {
       workspaceChanging = false;
     }
@@ -2125,7 +2181,7 @@ function bindWorkspaceSettings(panel: HTMLElement) {
 function renderEditor() {
   const nameRequired = tileForm?.kind === "folder";
   const nameHint = nameRequired ? "(Required)" : tileForm ? tileNameHints[tileForm.kind] : undefined;
-  const tabs = [["tiles", "Tiles"], ["edit-tile", "Edit tile"], ["workspace", "Workspace"], ["appearance", "Appearance"], ["theme", "Theme"], ["misc", "Behavior"], ["about", "About"]] as const;
+  const tabs = [["tiles", "Tiles"], ["edit-tile", "Edit tile"], ["workspace", "Workspace"], ["appearance", "Appearance"], ["misc", "Behavior"], ["about", "About"]] as const;
   const inactive = (tab: EditorTab) => editorTab === tab ? "" : 'inert aria-hidden="true"';
   app.innerHTML = `
     <section class="settings" aria-label="Palette settings">
@@ -2138,7 +2194,7 @@ function renderEditor() {
         ${settingsHeading("Tiles", "Drag a tile onto the palette or click to add it at the end.")}
         <div class="tile-sources">${tileDefinitions.map(({ kind, label, detail }) => `
           <button class="tile-source" type="button" draggable="true" data-kind="${kind}" aria-label="Add ${label}">
-            <span class="tile-source-icon">${settingsIcon(kind)}</span>
+            <span class="tile-source-icon" data-kind="${kind}">${settingsIcon(kind)}</span>
             <span class="tile-source-copy"><strong>${label}</strong><small>${detail}</small></span>
             <span class="tile-source-grip">${settingsIcon("grip")}</span>
           </button>
@@ -2149,9 +2205,35 @@ function renderEditor() {
       </div><div id="workspace-panel" role="tabpanel" aria-label="Workspace" ${inactive("workspace")}>
         ${editorTab === "workspace" ? workspaceSettings() : ""}
       </div><div class="appearance-panel" id="appearance-panel" role="tabpanel" aria-label="Appearance" ${inactive("appearance")}>
-        ${settingsHeading("Appearance", "Adjust the shape and spacing of your palette.")}
-        ${["Geometry", "Spacing"].map((group) => `
-          <h2 class="settings-group-heading">${group}</h2>
+        <section class="appearance-section" aria-labelledby="theme-heading">
+          <h2 id="theme-heading">Theme</h2>
+          <p>Choose a preset and customize the palette colors.</p>
+          <div class="setting-row">
+            <label for="theme-preset">Theme preset</label>
+            <select id="theme-preset">
+              <option value="" disabled>Custom</option>
+              ${themePresets.map(({ id, label }) => `<option value="${id}">${label}</option>`).join("")}
+            </select>
+          </div>
+          <div class="theme-color-grid">
+            ${themeColors.map(({ key, label }) => `
+              <div class="theme-color-field">
+                <label for="theme-${key}">${label}</label>
+                <span class="setting-color">
+                  <input id="theme-${key}" type="color" />
+                  <span class="setting-value" data-theme-value="${key}" aria-hidden="true"></span>
+                </span>
+              </div>
+            `).join("")}
+          </div>
+        </section>
+        ${([
+          { group: "Geometry", description: "Adjust the size and shape of tiles and icons." },
+          { group: "Spacing", description: "Control the spacing and padding between elements." },
+        ] as const).map(({ group, description }) => `
+          <section class="appearance-section" aria-labelledby="appearance-${group}">
+          <h2 id="appearance-${group}">${group}</h2>
+          <p>${description}</p>
           <div class="settings-range-grid">
             ${sliderDefinitions.filter((definition) => definition.group === group).map(({ key, label, min, max }) => `
               <div class="setting-range">
@@ -2162,25 +2244,8 @@ function renderEditor() {
                 </span>
                 <input id="setting-${key}" data-key="${key}" type="range" min="${min}" max="${max}" value="${appearance[key]}" />
               </div>`).join("")}
-          </div>`).join("")}
-      </div><div class="theme-panel" id="theme-panel" role="tabpanel" aria-label="Theme" ${inactive("theme")}>
-        ${settingsHeading("Theme", "Choose a preset or customize the palette colors.")}
-        <div class="setting-row">
-          <label for="theme-preset">Preset</label>
-          <select id="theme-preset">
-            <option value="" disabled>Custom</option>
-            ${themePresets.map(({ id, label }) => `<option value="${id}">${label}</option>`).join("")}
-          </select>
-        </div>
-        ${themeColors.map(({ key, label }) => `
-          <div class="setting-row">
-            <label for="theme-${key}">${label}</label>
-            <span class="setting-color">
-              <span class="setting-value" data-theme-value="${key}" aria-hidden="true"></span>
-              <input id="theme-${key}" type="color" />
-            </span>
           </div>
-        `).join("")}
+          </section>`).join("")}
       </div><div id="misc-panel" role="tabpanel" aria-label="Behavior" ${inactive("misc")}>
         ${settingsHeading("Behavior", "Control how the palette opens and moves.")}
         <h2 class="settings-group-heading">Shortcut</h2>
@@ -2211,7 +2276,6 @@ function renderEditor() {
         <p class="setting-note">© 2026 Vee Jay</p>
       </div>
       </div>
-      <div class="settings-status" role="status" aria-live="polite"></div>
       </div>
     </section>
     ${tileForm ? `<div class="form-backdrop">
@@ -2235,11 +2299,10 @@ function renderEditor() {
     hotkey.value = paletteHotkey ? displayHotkey(paletteHotkey) : "";
     const capture = async (event: KeyboardEvent | MouseEvent, button: string) => {
       if (savingHotkey) return;
-      const status = app.querySelector<HTMLElement>(".settings-status");
       const modifiers = [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && "Shift",
         event.metaKey && "Super"].filter(Boolean);
       if (!modifiers.length && !/^F\d+$/.test(button)) {
-        if (event instanceof KeyboardEvent && status) status.textContent = "Use a modifier key or a function key.";
+        if (event instanceof KeyboardEvent) showSettingsNotification("Use a modifier key or a function key.", true);
         return;
       }
       event.preventDefault();
@@ -2249,9 +2312,9 @@ function renderEditor() {
         paletteHotkey = await invoke<string>("set_palette_hotkey", { combination });
         const field = app.querySelector<HTMLInputElement>("#palette-hotkey");
         if (field) field.value = displayHotkey(paletteHotkey);
-        if (status) status.textContent = "Hotkey saved";
+        showSettingsNotification("Hotkey saved");
       } catch (error) {
-        if (status) status.textContent = `Could not change hotkey: ${String(error)}`;
+        showSettingsNotification(`Could not change hotkey: ${String(error)}`, true);
       } finally {
         savingHotkey = false;
       }
@@ -2351,8 +2414,7 @@ function renderEditor() {
         if (rootCount >= MAX_ITEMS) throw new Error(`Root ring is full (${MAX_ITEMS} items)`);
         openTileForm(kind, rootCount, null, workspaceId);
       } catch (error) {
-        const status = app.querySelector<HTMLElement>(".settings-status");
-        if (status) status.textContent = String(error);
+        showSettingsNotification(String(error), true);
       }
     });
   });
@@ -2429,7 +2491,7 @@ function renderEditor() {
         if (tileForm !== current) return;
         tileForm = null;
         renderEditor();
-        app.querySelector<HTMLElement>(".settings-status")!.textContent = "Tile added";
+        showSettingsNotification("Tile added");
       } catch (error) {
         form.querySelector<HTMLElement>(".tile-form-error")!.textContent = String(error);
         save.disabled = false;
@@ -2455,8 +2517,7 @@ function previewAppearance() {
   previewAppearanceFrame = window.requestAnimationFrame(() => {
     previewAppearanceFrame = 0;
     void invoke("preview_appearance", { appearance }).catch((error) => {
-      const status = app.querySelector<HTMLElement>(".settings-status");
-      if (status) status.textContent = `Could not preview: ${String(error)}`;
+      showSettingsNotification(`Could not preview: ${String(error)}`, true);
     });
   });
 }
@@ -2469,11 +2530,9 @@ function scheduleAppearanceSave(immediate = false) {
     saveQueue = saveQueue.then(async () => {
       try {
         await invoke<Appearance>("set_appearance", { appearance: snapshot });
-        const status = app.querySelector<HTMLElement>(".settings-status");
-        if (status) status.textContent = "Saved";
+        showSettingsNotification("Saved");
       } catch (error) {
-        const status = app.querySelector<HTMLElement>(".settings-status");
-        if (status) status.textContent = `Could not save: ${String(error)}`;
+        showSettingsNotification(`Could not save: ${String(error)}`, true);
       }
     });
   };
@@ -2482,11 +2541,13 @@ function scheduleAppearanceSave(immediate = false) {
 }
 
 async function startEditor() {
+  settingsNotification.className = "settings-notification";
+  settingsNotification.setAttribute("role", "status");
+  document.body.append(settingsNotification);
   try {
     await listen("workspaces-changed", () => {
       void invoke<WorkspaceList>("get_workspaces").then(applyEditorWorkspaces).catch((error) => {
-        const status = app.querySelector<HTMLElement>(".settings-status");
-        if (status) status.textContent = String(error);
+        showSettingsNotification(String(error), true);
       });
     });
     await listen<TileSelection | null>("tile-selection-changed", ({ payload }) => {
