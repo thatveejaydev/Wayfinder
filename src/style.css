@@ -633,6 +633,14 @@ body.editor-window :is(button, input, textarea, select, summary):focus-visible {
   font-weight: 650;
 }
 
+.backup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.backup-actions button:disabled { opacity: .55; cursor: default; }
+.backup-preview { max-height: calc(100% - 32px); color: var(--settings-text); }
+.backup-preview:not([open]) { display: none; }
+.backup-preview::backdrop { background: #080a0db8; }
+.backup-workspaces { margin: 10px 0; padding-inline-start: 20px; font-size: 13px; overflow-wrap: anywhere; }
+.backup-workspaces li + li { margin-top: 4px; }
+
 .tile-sources { display: grid; gap: 7px; }
 
 .tile-source {

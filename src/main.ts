@@ -50,6 +50,14 @@ type Workspace = { id: string; name: string; icon: string };
 type WorkspaceList = { revision: number; activeId: string; workspaces: Workspace[] };
 type WorkspacePalette = WorkspaceList & { shortcuts: Shortcut[] };
 type WorkspaceShortcuts = Workspace & { shortcuts: Shortcut[] };
+type BackupPreview = {
+  token: string;
+  workspaces: { name: string; tileCount: number; active: boolean }[];
+  paletteHotkey: string | null;
+  themeMode: ThemeMode;
+  paletteSize: number;
+};
+type RestoreResult = { workspaces: WorkspaceList; appearance: Appearance; paletteHotkey: string | null };
 type SearchResult = { id: string; item: Shortcut; workspace: Workspace; breadcrumb: string };
 type WorkspaceChange =
   | { type: "create"; name: string; icon: string }
@@ -1166,7 +1174,7 @@ function appendTile(
   button.innerHTML = `${tileIcon}${showLabel ? '<span class="shortcut-label"></span>' : ""}${result ? '<span class="shortcut-workspace"></span>' : ""}`;
   if (emoji) button.querySelector<HTMLElement>(".submenu-emoji")!.textContent = emoji;
   if (result) button.querySelector<HTMLElement>(".shortcut-workspace")!.textContent = result.workspace.name;
-  if (!draft && !item.preview && (item.kind === "app" || item.kind === "webpage")) {
+  if (!draft && !item.preview && (item.kind === "app" || item.kind === "webpage" || item.kind === "image")) {
     loadShortcutIcon(item, button.querySelector<HTMLElement>(".shortcut-icon")!, workspaceId,
       previewWorkspaceId ? undefined : searchKey ?? item.id);
   }
@@ -2221,6 +2229,109 @@ function bindWorkspaceSettings(panel: HTMLElement) {
   }
 }
 
+let backupBusy = false;
+
+function setBackupBusy(busy: boolean) {
+  backupBusy = busy;
+  app.querySelectorAll<HTMLButtonElement>(".backup-actions button").forEach((button) => { button.disabled = busy; });
+}
+
+function showBackupPreview(backup: BackupPreview) {
+  const dialog = document.createElement("dialog");
+  dialog.className = "tile-form backup-preview";
+  dialog.setAttribute("aria-labelledby", "backup-preview-title");
+  dialog.innerHTML = `
+    <form>
+      <h2 id="backup-preview-title">Restore this backup?</h2>
+      <p>This replaces all current workspaces, tiles, appearance, and the palette hotkey.</p>
+      <ul class="backup-workspaces" aria-label="Workspaces in the backup"></ul>
+      <p data-backup-appearance></p>
+      <p data-backup-hotkey></p>
+      <p>File and app shortcuts keep their saved paths. Some targets may need updating on this computer.</p>
+      <div class="tile-form-error" role="alert"></div>
+      <div class="tile-form-actions">
+        <button type="button" class="tile-cancel" autofocus>Cancel</button>
+        <button type="submit" class="tile-save">Restore backup</button>
+      </div>
+    </form>`;
+  const list = dialog.querySelector<HTMLUListElement>(".backup-workspaces")!;
+  for (const workspace of backup.workspaces) {
+    const item = document.createElement("li");
+    const count = `${workspace.tileCount} ${workspace.tileCount === 1 ? "tile" : "tiles"}`;
+    item.textContent = `${workspace.name} · ${count}${workspace.active ? " · Active" : ""}`;
+    list.append(item);
+  }
+  const hotkey = backup.paletteHotkey ? displayHotkey(backup.paletteHotkey) : "Unassigned";
+  dialog.querySelector<HTMLElement>("[data-backup-hotkey]")!.textContent = `Palette hotkey · ${hotkey}`;
+  const theme = { light: "Light", dark: "Dark", system: "System" }[backup.themeMode];
+  dialog.querySelector<HTMLElement>("[data-backup-appearance]")!.textContent = `Appearance · ${theme} theme · ${backup.paletteSize} px palette`;
+  const cancel = dialog.querySelector<HTMLButtonElement>(".tile-cancel")!;
+  const restore = dialog.querySelector<HTMLButtonElement>(".tile-save")!;
+  const error = dialog.querySelector<HTMLElement>(".tile-form-error")!;
+  let restoring = false;
+  dialog.addEventListener("cancel", (event) => {
+    if (restoring) event.preventDefault();
+  });
+  dialog.addEventListener("close", () => {
+    dialog.remove();
+    void invoke("discard_backup", { token: backup.token }).catch(() => {});
+    app.querySelector<HTMLButtonElement>("#restore-backup")?.focus({ preventScroll: true });
+  }, { once: true });
+  cancel.addEventListener("click", () => dialog.close());
+  dialog.querySelector("form")!.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (restoring || savingHotkey) return;
+    restoring = true;
+    cancel.disabled = restore.disabled = true;
+    error.textContent = "";
+    try {
+      await flushAppearanceWork();
+      const result = await invoke<RestoreResult>("restore_backup", { token: backup.token });
+      appearance = result.appearance;
+      paletteHotkey = result.paletteHotkey;
+      selectedTile = null;
+      tileForm = null;
+      workspaceDraft = null;
+      workspaceDeleteId = null;
+      editorTab = "misc";
+      applyEditorWorkspaces(result.workspaces);
+      renderEditor();
+      dialog.close();
+      showSettingsNotification("Backup restored");
+    } catch (failure) {
+      error.textContent = String(failure);
+      restoring = false;
+      cancel.disabled = restore.disabled = false;
+      restore.focus();
+    }
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
+function bindBackupSettings() {
+  const run = async (action: () => Promise<void>) => {
+    if (backupBusy || savingHotkey) return;
+    setBackupBusy(true);
+    try {
+      await flushAppearanceWork();
+      await action();
+    } catch (error) {
+      showSettingsNotification(String(error), true);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+  app.querySelector("#export-backup")?.addEventListener("click", () => void run(async () => {
+    const path = await invoke<string | null>("export_backup");
+    if (path) showSettingsNotification("Backup exported");
+  }));
+  app.querySelector("#restore-backup")?.addEventListener("click", () => void run(async () => {
+    const backup = await invoke<BackupPreview | null>("preview_backup");
+    if (backup) showBackupPreview(backup);
+  }));
+}
+
 function renderEditor() {
   const openAppearanceSections = new Set(Array.from(
     app.querySelectorAll<HTMLDetailsElement>(".appearance-disclosure[open]"),
@@ -2314,6 +2425,12 @@ function renderEditor() {
           <span>Cast shadow</span>
           <input id="palette-cast-shadow" class="setting-switch" type="checkbox" role="switch" ${appearance.castShadow ? "checked" : ""} />
         </label>
+        <h2 class="settings-group-heading">Backup &amp; restore</h2>
+        <p class="setting-note">Save all workspaces, tiles, appearance, and the palette hotkey in one file.</p>
+        <div class="backup-actions">
+          <button id="export-backup" class="tile-browse" type="button" ${backupBusy ? "disabled" : ""}>Export backup…</button>
+          <button id="restore-backup" class="tile-browse" type="button" ${backupBusy ? "disabled" : ""}>Restore from backup…</button>
+        </div>
       </div><div id="about-panel" role="tabpanel" aria-label="About" ${inactive("about")}>
         <header class="settings-heading"><h1>About Wayfinder</h1></header>
         <dl class="about-details">
@@ -2340,6 +2457,7 @@ function renderEditor() {
   `;
 
   applyPreferences();
+  bindBackupSettings();
   if (editorTab === "workspace") bindWorkspaceSettings(app.querySelector<HTMLElement>("#workspace-panel")!);
   const hotkey = app.querySelector<HTMLInputElement>("#palette-hotkey");
   if (hotkey) {
@@ -2558,15 +2676,28 @@ function openTileForm(kind: TileKind, index: number, parentId: string | null, wo
 }
 
 let previewAppearanceFrame = 0;
+let previewRequest = Promise.resolve();
+
+function sendAppearancePreview() {
+  previewAppearanceFrame = 0;
+  const snapshot = { ...appearance, theme: { ...appearance.theme } };
+  previewRequest = previewRequest.then(() => invoke<void>("preview_appearance", { appearance: snapshot }))
+    .catch((error) => showSettingsNotification(`Could not preview: ${String(error)}`, true));
+}
 
 function previewAppearance() {
   if (previewAppearanceFrame) return;
-  previewAppearanceFrame = window.requestAnimationFrame(() => {
-    previewAppearanceFrame = 0;
-    void invoke("preview_appearance", { appearance }).catch((error) => {
-      showSettingsNotification(`Could not preview: ${String(error)}`, true);
-    });
-  });
+  previewAppearanceFrame = window.requestAnimationFrame(sendAppearancePreview);
+}
+
+async function flushAppearanceWork() {
+  if (previewAppearanceFrame) {
+    window.cancelAnimationFrame(previewAppearanceFrame);
+    sendAppearancePreview();
+  }
+  await previewRequest;
+  if (saveTimer) scheduleAppearanceSave(true);
+  await saveQueue;
 }
 
 function scheduleAppearanceSave(immediate = false) {
@@ -2672,9 +2803,9 @@ async function openPalette() {
   }
 }
 
-function applyWorkspacePalette(next: WorkspacePalette) {
-  if (next.revision <= workspaceList.revision) return;
-  const switched = workspaceList.activeId !== next.activeId;
+function applyWorkspacePalette(next: WorkspacePalette, restored = false) {
+  if (next.revision < workspaceList.revision || (!restored && next.revision === workspaceList.revision)) return;
+  const switched = restored || workspaceList.activeId !== next.activeId;
   workspaceList = next;
   for (const key of shortcutIcons.keys()) {
     if (key.startsWith("search:")) shortcutIcons.delete(key);
@@ -2684,7 +2815,8 @@ function applyWorkspacePalette(next: WorkspacePalette) {
     resetPaletteSearch();
     focusedSubmenuId = null;
     activeSubmenus = [];
-    selectedTileId = null;
+    if (restored) resetEditSelection();
+    else selectedTileId = null;
     cancelTileReorder(false);
     incomingIndex = null;
     incomingParentId = null;
@@ -2785,6 +2917,11 @@ async function start() {
       if (!tileDraft) refresh();
     });
     await listen("workspaces-changed", refresh);
+    await listen("backup-restored", () => {
+      void invoke<WorkspacePalette>("get_workspace_palette")
+        .then((next) => applyWorkspacePalette(next, true))
+        .catch((error) => showToast(String(error), true));
+    });
     await listen("editor-opened", () => {
       if (editing) return;
       closeWorkspacePicker();
@@ -2939,7 +3076,7 @@ async function start() {
 }
 
 document.addEventListener("keydown", (event) => {
-  if (event.isComposing) return;
+  if (event.isComposing || document.querySelector(".backup-preview[open]")) return;
   if (!isEditorWindow && !event.defaultPrevented && !event.ctrlKey && !event.altKey && !event.metaKey
     && event.key === "Tab" && workspaceList.workspaces.length && !busy && !workspaceChanging && !tileDraft
     && !incomingTileKind && !externalDragging && !tileReorder) {

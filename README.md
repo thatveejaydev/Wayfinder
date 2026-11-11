@@ -24,4 +24,6 @@ The **Appearance** tab has sliders for tile size, text size, root shell inner ra
 
 Press **Ctrl+Space** from anywhere to show or hide the palette, or **Ctrl+,** to open Settings. Closing the palette window hides it so the shortcuts keep working. Right-click the tray icon for **Show palette**, **Settings**, and **Quit**.
 
+In **Settings → Behavior → Backup & restore**, choose **Export backup…** to save all workspaces, tiles, appearance settings, and the palette hotkey in one JSON file. **Restore from backup…** previews the workspaces and settings before replacing the current setup. File, folder, and app tiles keep their saved paths, so you may need to update them when restoring on a different computer.
+
 The palette currently opens as a centered window. Macros are future work.

@@ -1,6 +1,13 @@
-use crate::{next_shortcut_id, Shortcut};
+use crate::{
+    next_shortcut_id, normalized_webpage, parent_depth, Shortcut, MAX_RINGS, MAX_SHORTCUTS,
+};
 use serde::{Deserialize, Serialize};
-use std::{fs, io, path::Path, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    path::Path,
+    sync::Mutex,
+};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -87,6 +94,80 @@ fn workspace_info(id: String, name: String, icon: String) -> Result<WorkspaceInf
 }
 
 impl WorkspaceStore {
+    pub(crate) fn backup_copy(&self) -> Self {
+        let mut copy = self.clone();
+        copy.clear_previews();
+        copy
+    }
+
+    pub(crate) fn clear_previews(&mut self) {
+        for item in self
+            .workspaces
+            .iter_mut()
+            .flat_map(|workspace| &mut workspace.shortcuts)
+        {
+            item.preview = None;
+        }
+    }
+
+    pub(crate) fn backup_summary(&self) -> impl Iterator<Item = (&str, usize, bool)> {
+        self.workspaces.iter().map(|workspace| {
+            (
+                workspace.info.name.as_str(),
+                workspace.shortcuts.len(),
+                workspace.info.id == self.active_id,
+            )
+        })
+    }
+
+    pub(crate) fn validate_backup(&self) -> Result<(), String> {
+        let mut ids = HashSet::new();
+        for workspace in &self.workspaces {
+            let info = &workspace.info;
+            workspace_info(info.id.clone(), info.name.clone(), info.icon.clone())?;
+            if info.id.is_empty() || !ids.insert(&info.id) {
+                return Err("The backup contains invalid or duplicate workspace IDs".into());
+            }
+            let mut tile_ids = HashSet::new();
+            let mut ring_sizes = HashMap::new();
+            for item in &workspace.shortcuts {
+                if item.id.is_empty() || !tile_ids.insert(&item.id) {
+                    return Err("The backup contains invalid or duplicate tile IDs".into());
+                }
+                let parent_id = item.parent_id.as_deref();
+                let size = ring_sizes.entry(parent_id).or_insert(0);
+                *size += 1;
+                if *size > MAX_SHORTCUTS {
+                    return Err("A ring in the backup contains too many tiles".into());
+                }
+                let depth = parent_depth(&workspace.shortcuts, parent_id)?;
+                match item.kind.as_str() {
+                    "submenu" if depth < MAX_RINGS - 1 => (),
+                    "text" if item.text.as_ref().is_some_and(|text| !text.is_empty()) => (),
+                    "webpage" => {
+                        normalized_webpage(&item.path)?;
+                    }
+                    "folder" | "app" | "file" | "image" | "pdf" | "video" | "audio"
+                        if !item.path.is_empty() && !item.path.contains('\0') =>
+                    {
+                        ()
+                    }
+                    _ => return Err("The backup contains an invalid tile".into()),
+                }
+            }
+        }
+        if !ids.contains(&self.active_id) {
+            return Err("The backup does not specify a valid active workspace".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replace_from_backup(&mut self, mut restored: Self) -> WorkspaceList {
+        restored.revision = self.revision + 1;
+        *self = restored;
+        self.list()
+    }
+
     pub(crate) fn load(dir: &Path) -> io::Result<Self> {
         match fs::read(dir.join("workspaces.json")) {
             Ok(contents) => {

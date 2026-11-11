@@ -26,6 +26,7 @@ use walkdir::WalkDir;
 
 #[cfg(target_os = "windows")]
 mod app_launch;
+mod backup;
 #[cfg(target_os = "windows")]
 mod folder_launch;
 #[cfg(target_os = "windows")]
@@ -330,10 +331,9 @@ fn set_appearance(
 ) -> Result<Appearance, String> {
     let appearance = appearance.clamped();
     let json = serde_json::to_vec_pretty(&appearance).map_err(|e| e.to_string())?;
+    let mut cached = state.lock().map_err(|error| error.to_string())?;
     fs::write(appearance_path(&app)?, json).map_err(|e| e.to_string())?;
-    if let Ok(mut cached) = state.lock() {
-        *cached = appearance.clone();
-    }
+    *cached = appearance.clone();
     Ok(appearance)
 }
 
@@ -963,6 +963,14 @@ async fn shortcut_icon(
     };
     Ok(match kind.as_str() {
         "webpage" => tile_icons::site_icon(&path).await,
+        "image" => tauri::async_runtime::spawn_blocking(move || {
+            let path = Path::new(&path);
+            let metadata = fs::metadata(path).ok()?;
+            preview_for(path, &metadata)
+        })
+        .await
+        .ok()
+        .flatten(),
         #[cfg(windows)]
         "app" => tauri::async_runtime::spawn_blocking(move || tile_icons::app_icon(&path))
             .await
@@ -1365,9 +1373,13 @@ fn replace_palette_binding(
 
 fn init_palette_hotkey(app: &AppHandle) -> PaletteHotkey {
     let default = PaletteBinding::parse(DEFAULT_PALETTE_HOTKEY).unwrap();
-    let saved = hotkey_path(app)
+    let configured = hotkey_path(app)
         .ok()
-        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|path| fs::read_to_string(path).ok());
+    if configured.as_ref().is_some_and(|value| value.trim().is_empty()) {
+        return PaletteHotkey::default();
+    }
+    let saved = configured
         .and_then(|value| PaletteBinding::parse(value.trim()).ok())
         .unwrap_or(default);
     for shortcut in [Some(saved), (saved != default).then_some(default)]
@@ -1560,6 +1572,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
+            backup::recover_interrupted_restore(&app_data_dir)?;
             import_previous_data(&app_data_dir)?;
             tile_icons::init(app_data_dir.join("icon-cache"));
             #[cfg(all(debug_assertions, target_os = "windows"))]
@@ -1569,6 +1582,7 @@ pub fn run() {
             app.manage(Mutex::new(workspaces));
             app.manage(Mutex::new(appearance));
             app.manage(Mutex::new(DragSession::default()));
+            app.manage(backup::PendingBackup::default());
             app.handle()
                 .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
             if let Err(error) = app
@@ -1634,6 +1648,10 @@ pub fn run() {
             workspaces::get_workspace_search,
             workspaces::get_workspace_preview,
             workspaces::change_workspace,
+            backup::export_backup,
+            backup::preview_backup,
+            backup::discard_backup,
+            backup::restore_backup,
             list_shortcuts,
             shortcut_icon,
             add_paths,
