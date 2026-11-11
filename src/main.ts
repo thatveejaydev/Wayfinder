@@ -1079,9 +1079,11 @@ function appendTile(
   const activeSubmenu = !searching && visibleSubmenus().includes(item.id);
   const selected = editing && !searching && !previewWorkspaceId && selectedTileId === item.id;
   const name = shortcutName(item);
-  const action = previewWorkspaceId ? "Preview" : editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
+  const focusesSubmenu = !editing && item.kind === "submenu";
+  const action = focusesSubmenu ? "Focus" : previewWorkspaceId ? "Preview" : editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
   const location = result ? ` · ${result.breadcrumb}` : "";
   const labelText = `${action} ${name}${location}`;
+  const tooltip = focusesSubmenu ? `${labelText} (Shift+click)` : labelText;
   const searchKey = result ? `search:${result.id}` : undefined;
   const poolKey = searchKey ?? `${level}:${item.id}`;
   const signature = `${item.kind}\0${item.name}\0${item.path}\0${item.text ?? ""}\0${item.color ?? ""}\0${item.emoji ?? ""}\0${item.preview ?? ""}\0${editing ? 1 : 0}\0${searching ? 1 : 0}`;
@@ -1103,7 +1105,7 @@ function appendTile(
     button.classList.toggle("active-submenu", activeSubmenu);
     button.classList.remove("hovered", "reorder-source");
     button.setAttribute("aria-label", labelText);
-    button.title = labelText;
+    button.title = tooltip;
     if (searchSelected) button.setAttribute("aria-current", "true");
     else button.removeAttribute("aria-current");
     if (editing) button.setAttribute("aria-pressed", String(selected));
@@ -1155,7 +1157,7 @@ function appendTile(
   button.setAttribute("aria-label", labelText);
   if (searchSelected) button.setAttribute("aria-current", "true");
   if (editing && !previewWorkspaceId) button.setAttribute("aria-pressed", String(selected));
-  button.title = labelText;
+  button.title = tooltip;
   let tileIcon = "";
   if (item.kind === "submenu") {
     const offset = (outerRadius - innerRadius) / 2 - 12;
@@ -1627,7 +1629,9 @@ function backFromFocus(destination: "parent" | "root") {
 
 async function activate(item: Shortcut, level: number, shiftKey: boolean, workspaceId = workspaceList.activeId) {
   if (busy || workspaceChanging) return;
-  if (workspaceId !== workspaceList.activeId && (editing || item.kind === "submenu")) {
+  if (!editing && item.kind === "submenu" && !shiftKey) return;
+  const shouldSwitchWorkspace = workspaceHighlight !== null || editing || item.kind === "submenu";
+  if (workspaceId !== workspaceList.activeId && shouldSwitchWorkspace) {
     if (!await switchWorkspace(workspaceId)) return;
   }
   closeWorkspacePicker();
