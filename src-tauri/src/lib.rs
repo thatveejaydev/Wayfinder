@@ -1167,15 +1167,11 @@ fn present_settings(app: AppHandle) -> Result<(), String> {
     let editor = app
         .get_webview_window("editor")
         .ok_or_else(|| "Edit window not found".to_string())?;
-    let _ = fit_editor_height(app.clone(), 0);
-    if app
-        .get_webview_window("main")
-        .is_some_and(|main| main.is_visible().unwrap_or(false))
-    {
-        position_editor(&app);
-    } else {
-        let _ = editor.center();
+    if !palette_is_open(&app) {
+        return editor.close().map_err(|error| error.to_string());
     }
+    let _ = fit_editor_height(app.clone(), 0);
+    position_editor(&app);
     editor.show().map_err(|e| e.to_string())?;
     editor.set_focus().map_err(|e| e.to_string())?;
     app.emit_to("main", "editor-opened", ())
@@ -1494,12 +1490,14 @@ fn file_picker_open() -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn keep_palette_open(app: &AppHandle) -> bool {
+    // Settings can take focus before its window reports that it is visible.
+    file_picker_open() || app.get_webview_window("editor").is_some()
+}
+
+#[cfg(target_os = "windows")]
 fn dismiss_palette_at(app: &AppHandle, x: i32, y: i32) {
-    if file_picker_open()
-        || app
-            .get_webview_window("editor")
-            .is_some_and(|editor| editor.is_visible().unwrap_or(false))
-    {
+    if keep_palette_open(app) {
         return;
     }
     let Some(palette) = app.get_webview_window("main") else {
@@ -1528,15 +1526,26 @@ fn toggle_palette(app: &AppHandle) {
     }
 }
 
+fn palette_is_open(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .is_some_and(|palette| palette.is_visible().unwrap_or(false))
+}
+
 fn open_settings(app: &AppHandle) {
     static CREATING_SETTINGS: Mutex<()> = Mutex::new(());
 
+    if !palette_is_open(app) {
+        return;
+    }
     let app = app.clone();
     // WebView2 window creation must run outside the Windows event handler.
     tauri::async_runtime::spawn_blocking(move || {
         let Ok(_creation) = CREATING_SETTINGS.try_lock() else {
             return;
         };
+        if !palette_is_open(&app) {
+            return;
+        }
         if let Some(editor) = app.get_webview_window("editor") {
             if editor.is_visible().unwrap_or(false) {
                 if editor.is_minimized().unwrap_or(false) {
@@ -1599,16 +1608,13 @@ pub fn run() {
             app.manage(init_palette_hotkey(app.handle()));
 
             let show = MenuItem::with_id(app, "show", "Show palette", true, None::<&str>)?;
-            let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &settings, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     if event.id() == "show" {
                         show_palette(app);
-                    } else if event.id() == "settings" {
-                        open_settings(app);
                     } else if event.id() == "quit" {
                         app.exit(0);
                     }
@@ -1632,11 +1638,7 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             WindowEvent::Focused(false) if window.label() == "main" => {
                 let app = window.app_handle();
-                if !file_picker_open()
-                    && !app
-                        .get_webview_window("editor")
-                        .is_some_and(|editor| editor.is_visible().unwrap_or(false))
-                {
+                if !keep_palette_open(app) {
                     dismiss_palette(app.clone());
                 }
             }

@@ -36,6 +36,7 @@
         "minHeight": 400,
         "center": true,
         "visible": false,
+        "focus": false,
         "skipTaskbar": true,
         "resizable": true
       }

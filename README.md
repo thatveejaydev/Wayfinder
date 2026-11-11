@@ -13,7 +13,7 @@ Stopping `npm run tauri dev` also exits its development app and removes its tray
 
 On Windows, Wayfinder stores shortcuts, appearance settings, and the palette hotkey in `%APPDATA%\app.wayfinder.palette`. On startup it imports any missing files from the previous app data folder.
 
-Drag files or folders from Explorer onto the circular window. The palette saves their paths in its app data directory and leaves the originals untouched. Open **Settings** from the tray menu to enter edit mode. Click a tile to open the **Edit tile** tab, where you can edit it or choose **Remove tile**. You can also drag a tile to another position in its ring. Up to 12 shortcuts fit on each ring.
+Drag files or folders from Explorer onto the circular window. The palette saves their paths in its app data directory and leaves the originals untouched. Open **Settings** to enter edit mode. Click a tile to open the **Edit tile** tab, where you can edit it or choose **Remove tile**. You can also drag a tile to another position in its ring. Up to 12 shortcuts fit on each ring.
 
 Selecting a shortcut hides the floating palette immediately. The spaces between occupied ring slices are transparent.
 On Windows, selecting a running app brings it forward. If it was already in front when you opened the palette, selecting it minimizes that window.
@@ -22,7 +22,7 @@ Edit mode opens a settings window beside the palette. The **Tiles** tab comes fi
 
 The **Appearance** tab has sliders for tile size, text size, root shell inner radius, border thickness, tile corner radius, tile padding, and submenu padding. Tile size changes the palette smoothly while the settings window stays in place. Tile corner radius rounds the tile edges, with 0 keeping sharp corners. Tile padding controls the gap along both sides of each tile; at 0, neighboring tile edges touch. Submenu padding controls the space between rings. Changes preview as you drag and are saved in the app data directory. Closing the settings window exits edit mode.
 
-Press **Ctrl+Space** from anywhere to show or hide the palette, or **Ctrl+,** to open Settings. Closing the palette window hides it so the shortcuts keep working. Right-click the tray icon for **Show palette**, **Settings**, and **Quit**.
+Press **Ctrl+Space** from anywhere to show or hide the palette. While the palette is open, press **Ctrl+,** to open Settings beside it. Closing the palette window hides it so the shortcuts keep working. Right-click the tray icon for **Show palette** and **Quit**.
 
 In **Settings → Behavior → Backup & restore**, choose **Export backup…** to save all workspaces, tiles, appearance settings, and the palette hotkey in one JSON file. **Restore from backup…** previews the workspaces and settings before replacing the current setup. File, folder, and app tiles keep their saved paths, so you may need to update them when restoring on a different computer.
 

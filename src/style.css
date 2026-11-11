@@ -1061,27 +1061,26 @@ button.tile-color-swatch, .tile-shade { cursor: pointer; }
 
 .settings-notification {
   position: fixed;
-  inset: auto auto 12px 12px;
+  inset: 12px 0 auto;
   z-index: 11;
   width: max-content;
   max-width: min(400px, calc(100% - 24px));
-  padding: 9px 16px;
-  border: 1px solid var(--settings-line);
-  border-radius: 9px;
-  color: var(--settings-text);
-  background: var(--settings-field);
-  box-shadow: 0 4px 14px #0003;
+  margin-inline: auto;
+  padding: 8px 14px;
+  border-radius: 8px;
+  color: #fff;
+  background: #166534;
   font-size: 13px;
   font-weight: 600;
+  text-align: center;
   overflow-wrap: anywhere;
   pointer-events: none;
   opacity: 0;
-  transform: translateY(calc(100% + 12px));
-  transition: transform 180ms ease-out, opacity 140ms ease;
+  transition: opacity 140ms ease;
 }
 
-.settings-notification.visible { opacity: 1; transform: translateY(0); }
-.settings-notification.error { color: var(--settings-error); }
+.settings-notification.visible { opacity: 1; }
+.settings-notification.error { background: #991b1b; }
 
 @media (prefers-reduced-motion: reduce) {
   .settings-notification { transition: none; }
