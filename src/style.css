@@ -61,12 +61,11 @@ button { font: inherit; }
 }
 
 .segment {
-  --segment-border: var(--palette-border, #3b3b3b);
   transform: rotate(var(--submenu-angle));
   transform-box: view-box;
   transform-origin: center;
   fill: var(--palette-background, #181818);
-  stroke: var(--segment-border);
+  stroke: var(--palette-border, #3b3b3b);
   stroke-width: var(--border-thickness, 2px);
   cursor: pointer;
   transition: fill 130ms ease, stroke 130ms ease;
@@ -77,36 +76,9 @@ button { font: inherit; }
   pointer-events: visiblePainted;
 }
 
-.segment-depth, .segment-surface, .segment-lighting, .segment-accent {
+.segment-surface, .segment-accent {
   pointer-events: none;
   transition: translate 110ms ease-out;
-}
-
-.segment-depth, .segment-lighting { display: none; }
-
-:root[data-raised-tiles] .segment-depth {
-  display: inline;
-  --side-color: color-mix(in srgb, var(--palette-border, #3b3b3b), black 65%);
-  fill: var(--side-color);
-  stroke: var(--side-color);
-  /* Project the tile's side downward in screen space as the segment rotates. */
-  transform: translate(
-    calc(var(--tile-depth) * sin(var(--submenu-angle))),
-    calc(var(--tile-depth) * cos(var(--submenu-angle)))
-  );
-}
-
-:root[data-raised-tiles] .segment-lighting {
-  display: inline;
-  fill: url(#tile-face-light);
-  stroke: none;
-}
-
-:where(:root[data-raised-tiles]) .segment > .segment-surface {
-  /* Paint the lit rim with the tile face so it holds up as the tile moves. */
-  stroke: color-mix(in srgb, var(--segment-border), white 32%);
-  stroke-width: max(1.7px, var(--border-thickness, 2px));
-  stroke-linejoin: round;
 }
 
 .segment-accent {
@@ -120,14 +92,11 @@ button { font: inherit; }
 .segment:is(:hover, .hovered) > .segment-accent { opacity: .85; }
 
 .segment:hover, .segment.hovered, .is-dragging .segment {
-  --segment-border: var(--palette-custom-border, var(--palette-hover-border));
   fill: var(--palette-highlight, #5ba9f2);
+  stroke: var(--palette-custom-border, var(--palette-hover-border));
 }
 
-.segment.active-submenu {
-  --segment-border: var(--palette-custom-border, #78b9ef);
-  fill: var(--palette-active);
-}
+.segment.active-submenu { fill: var(--palette-active); stroke: var(--palette-custom-border, #78b9ef); }
 .is-editing .segment.selected-tile > .segment-surface {
   fill: var(--palette-background);
   stroke: color-mix(in srgb, var(--palette-highlight), var(--palette-background-text) 20%);
@@ -140,8 +109,8 @@ button { font: inherit; }
   stroke-dasharray: 5 4;
 }
 .segment.search-selected:not(:hover, .hovered) {
-  --segment-border: color-mix(in srgb, var(--palette-border), var(--palette-background-text) 45%);
   fill: color-mix(in srgb, var(--palette-background), var(--palette-background-text) 14%);
+  stroke: color-mix(in srgb, var(--palette-border), var(--palette-background-text) 45%);
 }
 .segment.active-submenu:is(:hover, .hovered),
 .is-dragging .segment.active-submenu { fill: var(--palette-highlight); }
@@ -201,13 +170,6 @@ button { font: inherit; }
 }
 
 .workspace-badge[hidden] { display: none; }
-
-:root[data-raised-tiles] .workspace-badge {
-  border-radius: 50%;
-  background: linear-gradient(145deg, #ffffff26, transparent 55%, #0004), var(--palette-background);
-  box-shadow: inset 0 1px 2px #ffffff4d, inset 0 -2px 3px #0005,
-    0 3px 0 color-mix(in srgb, var(--palette-border), black 65%), 0 5px 8px #0006;
-}
 
 .focus-controls, .search-summary {
   position: absolute;
@@ -392,7 +354,7 @@ button { font: inherit; }
 }
 
 :root:not([data-no-animations]) #app:not([data-reorder-level]) .stage:not(.is-dragging)
-  .segment:is(:hover, .hovered) > :is(.segment-depth, .segment-surface, .segment-lighting, .segment-accent) {
+  .segment:is(:hover, .hovered) > :is(.segment-surface, .segment-accent) {
   translate: var(--hover-slide) 0;
 }
 
@@ -1018,10 +980,6 @@ button.tile-color-swatch, .tile-shade { cursor: pointer; }
 }
 
 .theme-color-field { display: grid; gap: 5px; font-size: 12px; }
-
-.theme-depth-setting { margin-top: 8px; }
-.theme-depth-setting:has(input:disabled) { opacity: .55; }
-.theme-depth-setting input[type="range"]:disabled { cursor: default; }
 
 .setting-color {
   display: flex;

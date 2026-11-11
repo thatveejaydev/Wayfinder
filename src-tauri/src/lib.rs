@@ -155,11 +155,9 @@ enum ThemeMode {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default)]
 struct Theme {
     mode: ThemeMode,
-    raised_tiles: bool,
-    tile_depth: u32,
     background: Option<String>,
     highlight: Option<String>,
     border: Option<String>,
@@ -169,8 +167,6 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             mode: ThemeMode::Dark,
-            raised_tiles: false,
-            tile_depth: 6,
             background: None,
             highlight: None,
             border: None,
@@ -251,7 +247,6 @@ impl Appearance {
         self.tile_padding = self.tile_padding.clamp(0, 16);
         self.submenu_padding = self.submenu_padding.clamp(0, 24);
         self.color_label_distance = self.color_label_distance.min(24);
-        self.theme.tile_depth = self.theme.tile_depth.clamp(1, 8);
         for color in [
             &mut self.theme.background,
             &mut self.theme.highlight,
@@ -1643,8 +1638,6 @@ mod tests {
         assert!(matches!(appearance.theme.mode, ThemeMode::Dark));
         assert!(appearance.theme.background.is_none());
         assert_eq!(appearance.theme.border.as_deref(), Some("#8b6351"));
-        assert!(!appearance.theme.raised_tiles);
-        assert_eq!(appearance.theme.tile_depth, 6);
         assert!(appearance.animations);
     }
 
