@@ -16,7 +16,9 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut as Hotkey, ShortcutState};
+use tauri_plugin_global_shortcut::{
+    Code, GlobalShortcutExt, Modifiers, Shortcut as Hotkey, ShortcutState,
+};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 use walkdir::WalkDir;
@@ -153,9 +155,11 @@ enum ThemeMode {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 struct Theme {
     mode: ThemeMode,
+    raised_tiles: bool,
+    tile_depth: u32,
     background: Option<String>,
     highlight: Option<String>,
     border: Option<String>,
@@ -165,6 +169,8 @@ impl Default for Theme {
     fn default() -> Self {
         Self {
             mode: ThemeMode::Dark,
+            raised_tiles: false,
+            tile_depth: 6,
             background: None,
             highlight: None,
             border: None,
@@ -245,6 +251,7 @@ impl Appearance {
         self.tile_padding = self.tile_padding.clamp(0, 16);
         self.submenu_padding = self.submenu_padding.clamp(0, 24);
         self.color_label_distance = self.color_label_distance.min(24);
+        self.theme.tile_depth = self.theme.tile_depth.clamp(1, 8);
         for color in [
             &mut self.theme.background,
             &mut self.theme.highlight,
@@ -1296,7 +1303,14 @@ fn hotkey_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(appearance_path(app)?.with_file_name("palette-hotkey.txt"))
 }
 
+fn settings_hotkey() -> Hotkey {
+    Hotkey::new(Some(Modifiers::CONTROL), Code::Comma)
+}
+
 fn register_palette_hotkey(app: &AppHandle, shortcut: Hotkey) -> Result<(), String> {
+    if shortcut == settings_hotkey() {
+        return Err("Ctrl+, is reserved for opening Settings.".into());
+    }
     app.global_shortcut()
         .on_shortcut(shortcut, |app, _, event| {
             if event.state() == ShortcutState::Pressed {
@@ -1495,6 +1509,12 @@ fn toggle_palette(app: &AppHandle) {
     }
 }
 
+fn open_settings(app: &AppHandle) {
+    if set_edit_window_visible(app.clone(), true).is_ok() {
+        let _ = app.emit_to("main", "editor-opened", ());
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1513,6 +1533,16 @@ pub fn run() {
             app.manage(Mutex::new(DragSession::default()));
             app.handle()
                 .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
+            if let Err(error) = app
+                .global_shortcut()
+                .on_shortcut(settings_hotkey(), |app, _, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        open_settings(app);
+                    }
+                })
+            {
+                eprintln!("Could not register Ctrl+, for Settings: {error}");
+            }
             mouse_hotkey::init(app.handle());
             app.manage(init_palette_hotkey(app.handle()));
 
@@ -1526,9 +1556,7 @@ pub fn run() {
                     if event.id() == "show" {
                         show_palette(app);
                     } else if event.id() == "settings" {
-                        if set_edit_window_visible(app.clone(), true).is_ok() {
-                            let _ = app.emit_to("main", "editor-opened", ());
-                        }
+                        open_settings(app);
                     } else if event.id() == "quit" {
                         app.exit(0);
                     }
@@ -1605,7 +1633,7 @@ mod tests {
 
     #[test]
     fn old_appearance_keeps_saved_values_with_square_corners() {
-        let old = r#"{"shellSize":480,"textSize":10,"innerRadius":110,"borderThickness":1,"tilePadding":5,"submenuPadding":12}"#;
+        let old = r##"{"shellSize":480,"textSize":10,"innerRadius":110,"borderThickness":1,"tilePadding":5,"submenuPadding":12,"theme":{"border":"#8b6351"}}"##;
         let appearance: Appearance = serde_json::from_str(old).unwrap();
         assert_eq!(appearance.shell_size, 480);
         assert_eq!(appearance.icon_size, 42);
@@ -1614,6 +1642,9 @@ mod tests {
         assert_eq!(appearance.color_label_distance, 7);
         assert!(matches!(appearance.theme.mode, ThemeMode::Dark));
         assert!(appearance.theme.background.is_none());
+        assert_eq!(appearance.theme.border.as_deref(), Some("#8b6351"));
+        assert!(!appearance.theme.raised_tiles);
+        assert_eq!(appearance.theme.tile_depth, 6);
         assert!(appearance.animations);
     }
 

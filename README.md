@@ -22,6 +22,6 @@ Edit mode opens a settings window beside the palette. The **Tiles** tab comes fi
 
 The **Appearance** tab has sliders for tile size, text size, root shell inner radius, border thickness, tile corner radius, tile padding, and submenu padding. Tile size changes the palette smoothly while the settings window stays in place. Tile corner radius rounds the tile edges, with 0 keeping sharp corners. Tile padding controls the gap along both sides of each tile; at 0, neighboring tile edges touch. Submenu padding controls the space between rings. Changes preview as you drag and are saved in the app data directory. Closing the settings window exits edit mode.
 
-Press **Ctrl+Space** from anywhere to show or hide the palette. Closing the palette window hides it so the shortcut keeps working. Right-click the tray icon for **Show palette**, **Settings**, and **Quit**.
+Press **Ctrl+Space** from anywhere to show or hide the palette, or **Ctrl+,** to open Settings. Closing the palette window hides it so the shortcuts keep working. Right-click the tray icon for **Show palette**, **Settings**, and **Quit**.
 
 The palette currently opens as a centered window. Macros are future work.

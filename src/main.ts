@@ -67,7 +67,9 @@ const tileDefinitions: { kind: TileKind; label: string; detail: string }[] = [
 
 type ThemeMode = "light" | "dark" | "system";
 type ThemeColor = "background" | "highlight" | "border";
-type Theme = { mode: ThemeMode } & Record<ThemeColor, string | null>;
+type Theme = { mode: ThemeMode; raisedTiles: boolean; tileDepth: number } & Record<ThemeColor, string | null>;
+
+const tileDepthRange = { min: 1, max: 8, default: 6 };
 
 const themeColors: { key: ThemeColor; label: string; light: string; dark: string }[] = [
   { key: "background", label: "Palette background", light: "#f0f2f5", dark: "#181818" },
@@ -188,7 +190,7 @@ let appearance: Appearance = {
   tilePadding: 5,
   submenuPadding: 8,
   colorLabelDistance: 7,
-  theme: { mode: "dark", background: null, highlight: null, border: null },
+  theme: { mode: "dark", raisedTiles: false, tileDepth: tileDepthRange.default, background: null, highlight: null, border: null },
   animations: true,
   openAtScreenCenter: true,
   castShadow: false,
@@ -201,6 +203,8 @@ function applyPreferences() {
   root.style.setProperty("--tile-icon-scale", String(appearance.iconSize / DEFAULT_ICON_SIZE));
   root.toggleAttribute("data-no-animations", !appearance.animations);
   root.toggleAttribute("data-cast-shadow", appearance.castShadow);
+  root.toggleAttribute("data-raised-tiles", theme.raisedTiles);
+  root.style.setProperty("--tile-depth", `${theme.tileDepth}px`);
   root.dataset.theme = mode;
   for (const { key, ...defaults } of themeColors) {
     const color = theme[key] ?? defaults[mode];
@@ -282,14 +286,16 @@ function positionTile(button: HTMLButtonElement, radius: number, angle: number) 
 }
 
 function positionSegment(segment: SVGGElement, start: number, end: number, inner: number, outer: number) {
-  const [hitArea, surface, accent] = segment.children;
+  const [hitArea, depth, surface, lighting, accent] = segment.children;
   const span = end - start;
   const middle = (start + end) / 2;
   const { key, paths } = cachedRingSegmentPaths(span, inner, outer, Boolean(accent));
   if (segment.dataset.pathKey !== key) {
     segment.dataset.pathKey = key;
     hitArea.setAttribute("d", paths.tile);
+    depth.setAttribute("d", paths.tile);
     surface.setAttribute("d", paths.tile);
+    lighting.setAttribute("d", paths.tile);
     accent?.setAttribute("d", paths.accent);
   }
   segment.style.setProperty("--submenu-angle", `${middle}deg`);
@@ -1113,9 +1119,13 @@ function appendTile(
   const path = document.createElementNS(SVG_NS, "g");
   const hitArea = document.createElementNS(SVG_NS, "path");
   hitArea.classList.add("segment-hit-area");
+  const depth = document.createElementNS(SVG_NS, "path");
+  depth.classList.add("segment-depth");
   const surface = document.createElementNS(SVG_NS, "path");
   surface.classList.add("segment-surface");
-  path.append(hitArea, surface);
+  const lighting = document.createElementNS(SVG_NS, "path");
+  lighting.classList.add("segment-lighting");
+  path.append(hitArea, depth, surface, lighting);
   const color = tileLabelColor(item.color);
   if (color) {
     const accent = document.createElementNS(SVG_NS, "path");
@@ -1227,12 +1237,16 @@ function animateTileEntrance(
     fill: "backwards",
   };
   const rotation = "rotate(var(--submenu-angle))";
+  // Bring raised edges up to full contrast early while the tile is still moving.
+  const earlyFade = appearance.theme.raisedTiles ? [{ opacity: 1, offset: .55 }] : [];
   path.animate([
     { opacity: 0, transform: root ? `rotate(calc(var(--submenu-angle) - ${turn}deg))` : `${rotation} translateX(-12px)` },
+    ...earlyFade,
     { opacity: 1, transform: root ? rotation : `${rotation} translateX(0px)` },
   ], timing);
   button.animate([
     { opacity: 0, left: `${fromX / 6.2}%`, top: `${fromY / 6.2}%` },
+    ...earlyFade,
     { opacity: 1, left: button.style.left, top: button.style.top },
   ], timing);
 }
@@ -1307,6 +1321,13 @@ function ensureStageShell() {
     <main class="stage">
       <div class="palette" aria-label="Wayfinder shortcut palette">
         <svg class="ring-svg" viewBox="0 0 620 620" aria-hidden="true">
+          <defs>
+            <linearGradient id="tile-face-light" x1="100%" y1="0%" x2="20%" y2="100%">
+              <stop stop-color="white" stop-opacity=".16" />
+              <stop offset=".53" stop-color="white" stop-opacity=".025" />
+              <stop offset="1" stop-color="black" stop-opacity=".14" />
+            </linearGradient>
+          </defs>
           <g class="ring-segments"></g>
           <g class="child-segments"></g>
           <path class="root-drop-indicator drop-indicator" />
@@ -2226,6 +2247,16 @@ function renderEditor() {
               </div>
             `).join("")}
           </div>
+          <div class="setting-row">
+            <label for="theme-raised-tiles">3D tile effect</label>
+            <input id="theme-raised-tiles" class="setting-switch" type="checkbox" role="switch" ${appearance.theme.raisedTiles ? "checked" : ""} />
+          </div>
+          <div class="setting-range theme-depth-setting">
+            <label for="theme-tile-depth">Tile depth</label>
+            <span id="theme-tile-depth-value" class="setting-value" aria-hidden="true"></span>
+            <input id="theme-tile-depth" type="range" min="${tileDepthRange.min}" max="${tileDepthRange.max}" step="1"
+              value="${appearance.theme.tileDepth}" ${appearance.theme.raisedTiles ? "" : "disabled"} />
+          </div>
         </section>
         ${([
           { group: "Geometry", description: "Adjust the size and shape of tiles and icons." },
@@ -2349,6 +2380,31 @@ function renderEditor() {
     previewAppearance();
     scheduleAppearanceSave(true);
   });
+  const raisedTiles = app.querySelector<HTMLInputElement>("#theme-raised-tiles");
+  const tileDepth = app.querySelector<HTMLInputElement>("#theme-tile-depth")!;
+  const tileDepthValue = app.querySelector<HTMLElement>("#theme-tile-depth-value")!;
+  const updateDepthSlider = () => {
+    const { min, max } = tileDepthRange;
+    const depth = tileDepth.valueAsNumber;
+    tileDepthValue.textContent = `${depth} px`;
+    tileDepth.setAttribute("aria-valuetext", `${depth} pixels`);
+    tileDepth.style.setProperty("--progress", `${(depth - min) / (max - min) * 100}%`);
+  };
+  updateDepthSlider();
+  tileDepth.addEventListener("input", () => {
+    appearance.theme.tileDepth = tileDepth.valueAsNumber;
+    updateDepthSlider();
+    previewAppearance();
+    scheduleAppearanceSave();
+  });
+  tileDepth.addEventListener("change", () => scheduleAppearanceSave(true));
+  raisedTiles?.addEventListener("change", () => {
+    appearance.theme.raisedTiles = raisedTiles.checked;
+    tileDepth.disabled = !raisedTiles.checked;
+    applyPreferences();
+    previewAppearance();
+    scheduleAppearanceSave(true);
+  });
   const presetSelect = app.querySelector<HTMLSelectElement>("#theme-preset");
   if (presetSelect) {
     presetSelect.addEventListener("change", () => {
@@ -2419,7 +2475,7 @@ function renderEditor() {
     });
   });
 
-  app.querySelectorAll<HTMLInputElement>("input[type=range]").forEach((input) => {
+  app.querySelectorAll<HTMLInputElement>("input[type=range][data-key]").forEach((input) => {
     const { key, min, max } = sliderDefinitions.find((item) => item.key === input.dataset.key)!;
     const number = app.querySelector<HTMLInputElement>(`#setting-${key}-value`)!;
     const updateTrack = (value: number) => {
