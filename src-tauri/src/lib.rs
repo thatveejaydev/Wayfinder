@@ -1209,8 +1209,20 @@ fn fit_editor_height(app: AppHandle, height: u32) -> Result<(), String> {
     let scale = editor.scale_factor().map_err(|error| error.to_string())?;
     let frame = outer.height.saturating_sub(inner.height);
     let available = work.size.height.saturating_sub(frame).max(1);
-    let requested = (f64::from(height) * scale).ceil() as u32;
-    let target = inner.height.max(requested).min(available);
+    let target = if height == 0 {
+        inner.height.min(available)
+    } else {
+        let minimum = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|window| window.label == "editor")
+            .and_then(|window| window.min_height)
+            .unwrap_or(0.0);
+        let requested = (f64::from(height).max(minimum) * scale).ceil() as u32;
+        requested.min(available)
+    };
     if target != inner.height {
         editor
             .set_size(PhysicalSize::new(inner.width, target))

@@ -220,11 +220,8 @@ button { font: inherit; }
 .workspace-picker {
   position: absolute;
   z-index: 3;
-  top: calc(50% + min(var(--tile-size, 620px), 100vh) * 231 / 620 + 14px);
-  left: 50%;
   width: max-content;
   max-width: min(360px, calc(100vw - 24px));
-  transform: translateX(-50%);
   color: var(--palette-background-text, #fff);
   text-align: center;
 }
@@ -886,6 +883,31 @@ button.tile-color-swatch, .tile-shade { cursor: pointer; }
 
 .appearance-section h2 { margin: 0; font-size: 17px; line-height: 1.2; }
 .appearance-section > p { margin: 2px 0 12px; color: var(--settings-muted); font-size: 12px; }
+
+.appearance-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.2;
+  list-style: none;
+}
+
+.appearance-disclosure > summary::-webkit-details-marker { display: none; }
+
+.appearance-disclosure > summary::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-inline-end: 4px;
+  border-inline-end: 2px solid var(--settings-muted);
+  border-block-end: 2px solid var(--settings-muted);
+  transform: rotate(45deg);
+}
+
+.appearance-disclosure[open] > summary::after { transform: rotate(225deg); }
 
 .settings-range-grid {
   display: grid;

@@ -1182,16 +1182,15 @@ function appendTile(
   const createdEntry: CachedTileEntry = { path, button, signature, item, level };
   if (!previewWorkspaceId) tileElementPool.set(poolKey, createdEntry);
 
+  const activateTile = (event: MouseEvent) => activate(createdEntry.item, createdEntry.level, event.shiftKey, workspaceId);
+  path.addEventListener("click", activateTile);
+  button.addEventListener("click", activateTile);
   if (previewWorkspaceId) {
     button.addEventListener("pointerdown", (event) => event.preventDefault());
-  } else {
+  } else if (!searching) {
     const prepareReorder = (event: PointerEvent) => prepareTileReorder(event, createdEntry.item, createdEntry.level, path, button);
-    path.addEventListener("click", (event) => activate(createdEntry.item, createdEntry.level, event.shiftKey, workspaceId));
-    if (!searching) {
-      path.addEventListener("pointerdown", prepareReorder);
-      button.addEventListener("pointerdown", prepareReorder);
-    }
-    button.addEventListener("click", (event) => activate(createdEntry.item, createdEntry.level, event.shiftKey, workspaceId));
+    path.addEventListener("pointerdown", prepareReorder);
+    button.addEventListener("pointerdown", prepareReorder);
   }
   button.addEventListener("pointerenter", () => {
     path.classList.add("hovered");
@@ -1294,6 +1293,7 @@ function refreshSubmenus(firstLevel: 1 | 2, openingLevel?: 1 | 2) {
       else tile.classList.toggle("selected-tile", selected);
     }
   });
+  positionWorkspacePicker();
 }
 
 function ensureStageShell() {
@@ -1318,6 +1318,10 @@ function ensureStageShell() {
     </main>`;
     bindPaletteSearch(app.querySelector<HTMLInputElement>("#palette-search")!);
     stage = app.querySelector<HTMLElement>(".stage")!;
+    const pickerLayout = new ResizeObserver(positionWorkspacePicker);
+    pickerLayout.observe(stage);
+    pickerLayout.observe(stage.querySelector(".palette")!);
+    pickerLayout.observe(app.querySelector(".workspace-picker")!);
   }
   return stage;
 }
@@ -1328,12 +1332,48 @@ function focusWorkspaceChoice() {
   choice?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
+function positionWorkspacePicker() {
+  const picker = app.querySelector<HTMLElement>(".workspace-picker");
+  if (!picker || picker.hidden) return;
+
+  const gap = 14;
+  const margin = 12;
+  const { width: viewportWidth, height: viewportHeight } = app.getBoundingClientRect();
+  const { width, height } = picker.getBoundingClientRect();
+  const svg = app.querySelector<SVGSVGElement>(".ring-svg")!.getBoundingClientRect();
+  const centerX = svg.left + svg.width / 2;
+  const centerY = svg.top + svg.height / 2;
+  const radius = (OUTER + appearance.borderThickness / 2) * Math.min(svg.width, svg.height) / 620;
+  const bounds = [new DOMRect(centerX - radius, centerY - radius, radius * 2, radius * 2)];
+  for (const tile of app.querySelectorAll(".child-segments .segment-surface, .shortcut")) {
+    bounds.push(tile.getBoundingClientRect());
+  }
+
+  const maxX = Math.max(margin, viewportWidth - width - margin);
+  const maxY = Math.max(margin, viewportHeight - height - margin);
+  const fits = ([x, y]: number[]) => x >= margin && x <= maxX && y >= margin && y <= maxY
+    && bounds.every((tile) => x + width + gap <= tile.left || x >= tile.right + gap
+      || y + height + gap <= tile.top || y >= tile.bottom + gap);
+  const x = Math.max(margin, Math.min(maxX, centerX - width / 2));
+  const y = Math.max(margin, Math.min(maxY, centerY - height / 2));
+  const below = Math.max(...bounds.map((tile) => tile.bottom)) + gap;
+  const above = Math.min(...bounds.map((tile) => tile.top)) - height - gap;
+  const right = Math.max(...bounds.map((tile) => tile.right)) + gap;
+  const left = Math.min(...bounds.map((tile) => tile.left)) - width - gap;
+  const edge = maxY - below >= above - margin ? maxY : margin;
+  const [pickerX, pickerY] = [[x, below], [x, above], [right, y], [left, y]].find(fits) ?? [x, edge];
+  picker.style.left = `${pickerX}px`;
+  picker.style.top = `${pickerY}px`;
+}
+
 function renderWorkspacePicker() {
   const picker = app.querySelector<HTMLElement>(".workspace-picker")!;
   const hadFocus = picker.contains(document.activeElement);
   picker.hidden = workspaceHighlight === null;
   if (picker.hidden) {
     picker.replaceChildren();
+    picker.style.removeProperty("left");
+    picker.style.removeProperty("top");
     return;
   }
   const track = document.createElement("div");
@@ -1362,6 +1402,7 @@ function renderWorkspacePicker() {
     return button;
   }));
   picker.replaceChildren(track, caption);
+  positionWorkspacePicker();
   if (hadFocus) focusWorkspaceChoice();
 }
 
@@ -1382,7 +1423,7 @@ async function previewWorkspace(id: string) {
   const request = ++workspacePreviewRequest;
   if (id === workspaceList.activeId) {
     workspacePreview = null;
-    previewSubmenus = [];
+    previewSubmenus = focusedSubmenuId === null ? [...activeSubmenus] : [];
     render("workspace-preview");
     return;
   }
@@ -1555,6 +1596,7 @@ function render(transition?: "opening" | "search" | "workspace-preview") {
     updateChildDropIndicator(2, false);
   }
   if (transition !== "workspace-preview") renderWorkspacePicker();
+  else positionWorkspacePicker();
 }
 
 function resetEditSelection() {
@@ -1580,6 +1622,7 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean, worksp
   if (workspaceId !== workspaceList.activeId && (editing || item.kind === "submenu")) {
     if (!await switchWorkspace(workspaceId)) return;
   }
+  closeWorkspacePicker();
   if (editing) {
     selectedTileId = item.id;
     if (item.kind !== "submenu") activeSubmenus = activeSubmenus.slice(0, level);
@@ -2179,9 +2222,13 @@ function bindWorkspaceSettings(panel: HTMLElement) {
 }
 
 function renderEditor() {
+  const openAppearanceSections = new Set(Array.from(
+    app.querySelectorAll<HTMLDetailsElement>(".appearance-disclosure[open]"),
+    ({ id }) => id,
+  ));
   const nameRequired = tileForm?.kind === "folder";
   const nameHint = nameRequired ? "(Required)" : tileForm ? tileNameHints[tileForm.kind] : undefined;
-  const tabs = [["tiles", "Tiles"], ["edit-tile", "Edit tile"], ["workspace", "Workspace"], ["appearance", "Appearance"], ["misc", "Behavior"], ["about", "About"]] as const;
+  const tabs = [["tiles", "Tiles"], ["edit-tile", "Modify"], ["workspace", "Workspace"], ["appearance", "Appearance"], ["misc", "Behavior"], ["about", "About"]] as const;
   const inactive = (tab: EditorTab) => editorTab === tab ? "" : 'inert aria-hidden="true"';
   app.innerHTML = `
     <section class="settings" aria-label="Palette settings">
@@ -2199,8 +2246,8 @@ function renderEditor() {
             <span class="tile-source-grip">${settingsIcon("grip")}</span>
           </button>
         `).join("")}</div>
-      </div><div id="edit-tile-panel" role="tabpanel" aria-label="Edit tile" ${inactive("edit-tile")}>
-        ${settingsHeading("Edit tile", selectedTile ? "Manage the tile selected on your palette." : "Select a tile on the palette to edit it.")}
+      </div><div id="edit-tile-panel" role="tabpanel" aria-label="Modify" ${inactive("edit-tile")}>
+        ${settingsHeading("Modify", selectedTile ? "Manage the tile selected on your palette." : "Select a tile on the palette to edit it.")}
         ${selectedTile && editorTab === "edit-tile" ? selectedTileForm(selectedTile) : ""}
       </div><div id="workspace-panel" role="tabpanel" aria-label="Workspace" ${inactive("workspace")}>
         ${editorTab === "workspace" ? workspaceSettings() : ""}
@@ -2231,8 +2278,8 @@ function renderEditor() {
           { group: "Geometry", description: "Adjust the size and shape of tiles and icons." },
           { group: "Spacing", description: "Control the spacing and padding between elements." },
         ] as const).map(({ group, description }) => `
-          <section class="appearance-section" aria-labelledby="appearance-${group}">
-          <h2 id="appearance-${group}">${group}</h2>
+          <details class="appearance-section appearance-disclosure" id="appearance-${group}" ${openAppearanceSections.has(`appearance-${group}`) ? "open" : ""}>
+          <summary>${group}</summary>
           <p>${description}</p>
           <div class="settings-range-grid">
             ${sliderDefinitions.filter((definition) => definition.group === group).map(({ key, label, min, max }) => `
@@ -2245,7 +2292,7 @@ function renderEditor() {
                 <input id="setting-${key}" data-key="${key}" type="range" min="${min}" max="${max}" value="${appearance[key]}" />
               </div>`).join("")}
           </div>
-          </section>`).join("")}
+          </details>`).join("")}
       </div><div id="misc-panel" role="tabpanel" aria-label="Behavior" ${inactive("misc")}>
         ${settingsHeading("Behavior", "Control how the palette opens and moves.")}
         <h2 class="settings-group-heading">Shortcut</h2>
@@ -2900,7 +2947,7 @@ document.addEventListener("keydown", (event) => {
     const { activeId, workspaces } = workspaceList;
     if (workspaceHighlight === null) {
       workspaceHighlight = activeId;
-      if (!editing || !selectedTileId) activeSubmenus = [];
+      previewSubmenus = focusedSubmenuId === null ? [...activeSubmenus] : [];
       render();
     } else {
       const index = workspaces.findIndex(({ id }) => id === workspaceHighlight);
