@@ -2526,6 +2526,7 @@ function scheduleAppearanceSave(immediate = false) {
   window.clearTimeout(saveTimer);
   saveTimer = 0;
   const save = () => {
+    saveTimer = 0;
     const snapshot = { ...appearance, theme: { ...appearance.theme } };
     saveQueue = saveQueue.then(async () => {
       try {
@@ -2544,7 +2545,24 @@ async function startEditor() {
   settingsNotification.className = "settings-notification";
   settingsNotification.setAttribute("role", "status");
   document.body.append(settingsNotification);
+  const editor = getCurrentWindow();
+  let closing = false;
   try {
+    await editor.onCloseRequested(async (event) => {
+      event.preventDefault();
+      if (closing) return;
+      closing = true;
+      app.inert = true;
+      if (saveTimer) scheduleAppearanceSave(true);
+      await saveQueue;
+      try {
+        await editor.destroy();
+      } catch (error) {
+        closing = false;
+        app.inert = false;
+        showSettingsNotification(`Could not close Settings: ${String(error)}`, true);
+      }
+    });
     await listen("workspaces-changed", () => {
       void invoke<WorkspaceList>("get_workspaces").then(applyEditorWorkspaces).catch((error) => {
         showSettingsNotification(String(error), true);
@@ -2564,11 +2582,6 @@ async function startEditor() {
     await listen<[TileKind, number, string | null, string, string]>("tile-form-requested", (event) => {
       openTileForm(...event.payload);
     });
-    await listen("editor-closed", () => {
-      if (!tileForm?.draftId) return;
-      tileForm = null;
-      renderEditor();
-    });
     const [initialAppearance, initialHotkey, initialWorkspaces] = await Promise.all([
       invoke<Appearance>("get_appearance"),
       invoke<string | null>("get_palette_hotkey"),
@@ -2581,6 +2594,9 @@ async function startEditor() {
     window.addEventListener("focus", observeEditorHeight);
   } catch (error) {
     app.textContent = `Could not load palette settings: ${String(error)}`;
+  }
+  if (!closing) {
+    await invoke("present_settings").catch((error) => console.error("Could not show Settings:", error));
   }
 }
 
@@ -2923,11 +2939,7 @@ document.addEventListener("keydown", (event) => {
       return;
     }
     if (editing) {
-      void invoke("set_edit_window_visible", { visible: false }).then(() => {
-        editing = false;
-        resetEditSelection();
-        render();
-      }).catch((error) => showToast(String(error), true));
+      void invoke("request_settings_close").catch((error) => showToast(String(error), true));
     } else {
       void getCurrentWindow().close();
     }

@@ -27,6 +27,7 @@
       },
       {
         "label": "editor",
+        "create": false,
         "title": "Wayfinder • Palette settings",
         "url": "index.html?editor=1",
         "width": 560,

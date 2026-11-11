@@ -13,7 +13,8 @@ use std::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{
@@ -1154,30 +1155,29 @@ async fn open_shortcut(
 }
 
 #[tauri::command]
-fn set_edit_window_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+fn present_settings(app: AppHandle) -> Result<(), String> {
     let editor = app
         .get_webview_window("editor")
         .ok_or_else(|| "Edit window not found".to_string())?;
-    if visible {
-        if !editor.is_visible().map_err(|e| e.to_string())? {
-            let _ = tauri::async_runtime::spawn_blocking(collect_installed_apps);
-            let _ = fit_editor_height(app.clone(), 0);
-            if app
-                .get_webview_window("main")
-                .is_some_and(|main| main.is_visible().unwrap_or(false))
-            {
-                position_editor(&app);
-            } else {
-                let _ = editor.center();
-            }
-            editor.show().map_err(|e| e.to_string())?;
-        }
-        if editor.is_minimized().map_err(|e| e.to_string())? {
-            editor.unminimize().map_err(|e| e.to_string())?;
-        }
-        editor.set_focus().map_err(|e| e.to_string())?;
+    let _ = fit_editor_height(app.clone(), 0);
+    if app
+        .get_webview_window("main")
+        .is_some_and(|main| main.is_visible().unwrap_or(false))
+    {
+        position_editor(&app);
     } else {
-        editor.hide().map_err(|e| e.to_string())?;
+        let _ = editor.center();
+    }
+    editor.show().map_err(|e| e.to_string())?;
+    editor.set_focus().map_err(|e| e.to_string())?;
+    app.emit_to("main", "editor-opened", ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn request_settings_close(app: AppHandle) -> Result<(), String> {
+    if let Some(editor) = app.get_webview_window("editor") {
+        editor.close().map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -1458,10 +1458,10 @@ fn dismiss_palette(app: AppHandle) {
         let _ = window.hide();
     }
     if let Some(editor) = app.get_webview_window("editor") {
-        let _ = editor.hide();
+        let _ = editor.close();
+    } else {
+        let _ = app.emit_to("main", "editor-closed", ());
     }
-    let _ = app.emit_to("main", "editor-closed", ());
-    let _ = app.emit_to("editor", "editor-closed", ());
 }
 
 #[cfg(target_os = "windows")]
@@ -1505,9 +1505,40 @@ fn toggle_palette(app: &AppHandle) {
 }
 
 fn open_settings(app: &AppHandle) {
-    if set_edit_window_visible(app.clone(), true).is_ok() {
-        let _ = app.emit_to("main", "editor-opened", ());
-    }
+    static CREATING_SETTINGS: Mutex<()> = Mutex::new(());
+
+    let app = app.clone();
+    // WebView2 window creation must run outside the Windows event handler.
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(_creation) = CREATING_SETTINGS.try_lock() else {
+            return;
+        };
+        if let Some(editor) = app.get_webview_window("editor") {
+            if editor.is_visible().unwrap_or(false) {
+                if editor.is_minimized().unwrap_or(false) {
+                    let _ = editor.unminimize();
+                }
+                let _ = editor.set_focus();
+            }
+            return;
+        }
+        let Some(config) = app
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|window| window.label == "editor")
+        else {
+            eprintln!("Settings window configuration is missing");
+            return;
+        };
+        match WebviewWindowBuilder::from_config(&app, config).and_then(|builder| builder.build()) {
+            Ok(_) => {
+                tauri::async_runtime::spawn_blocking(collect_installed_apps);
+            }
+            Err(error) => eprintln!("Could not open Settings: {error}"),
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1567,12 +1598,10 @@ pub fn run() {
                 if window.label() == "main" {
                     api.prevent_close();
                     dismiss_palette(window.app_handle().clone());
-                } else if window.label() == "editor" {
-                    api.prevent_close();
-                    let _ = window.hide();
-                    let _ = window.app_handle().emit_to("main", "editor-closed", ());
-                    let _ = window.app_handle().emit_to("editor", "editor-closed", ());
                 }
+            }
+            WindowEvent::Destroyed if window.label() == "editor" => {
+                let _ = window.app_handle().emit_to("main", "editor-closed", ());
             }
             #[cfg(target_os = "windows")]
             WindowEvent::Focused(false) if window.label() == "main" => {
@@ -1598,7 +1627,8 @@ pub fn run() {
             add_paths,
             remove_shortcut,
             open_shortcut,
-            set_edit_window_visible,
+            present_settings,
+            request_settings_close,
             fit_editor_height,
             get_appearance,
             set_appearance,
