@@ -32,6 +32,8 @@ mod folder_launch;
 #[cfg(target_os = "windows")]
 mod keyboard;
 mod mouse_hotkey;
+#[cfg(target_os = "windows")]
+mod terminal_launch;
 mod tile_icons;
 mod workspaces;
 
@@ -1202,7 +1204,7 @@ async fn open_shortcut(
                 let path = item.path.clone();
                 let opened = tauri::async_runtime::spawn_blocking(move || {
                     if in_terminal.unwrap_or(false) {
-                        folder_launch::open_in_terminal(Path::new(&path)).map(|()| true)
+                        terminal_launch::open_in_terminal(Path::new(&path)).map(|()| true)
                     } else {
                         folder_launch::open_in_explorer_tab(&path)
                     }

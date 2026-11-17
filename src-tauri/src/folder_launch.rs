@@ -1,7 +1,4 @@
-use std::{
-    os::windows::process::CommandExt, path::Path, process::Command, ptr, sync::Mutex, thread,
-    time::Duration,
-};
+use std::{ptr, sync::Mutex, thread, time::Duration};
 use windows::{
     core::{w, Interface, BOOL, HSTRING, PCWSTR},
     Win32::{
@@ -36,25 +33,8 @@ use windows::{
 
 static OPEN_EXPLORER_TAB: Mutex<()> = Mutex::new(());
 
-pub(super) fn open_in_terminal(path: &Path) -> Result<(), String> {
-    if Command::new("wt.exe")
-        .args(["-d", "."])
-        .current_dir(path)
-        .spawn()
-        .is_err()
-    {
-        const CREATE_NEW_CONSOLE: u32 = 0x10;
-        Command::new("powershell.exe")
-            .arg("-NoLogo")
-            .current_dir(path)
-            .creation_flags(CREATE_NEW_CONSOLE)
-            .spawn()
-            .map_err(|error| format!("Could not open a terminal: {error}"))?;
-    }
-    Ok(())
-}
-
-struct ComApartment;
+/// Balances a successful `CoInitializeEx` on this thread.
+pub(super) struct ComApartment;
 
 impl Drop for ComApartment {
     fn drop(&mut self) {
@@ -145,7 +125,7 @@ fn shows_folder(browser: &IShellBrowser, target: &IShellItem) -> windows::core::
     }
 }
 
-fn bring_to_front(frame: HWND) {
+pub(super) fn bring_to_front(frame: HWND) {
     if unsafe { IsIconic(frame) }.as_bool() {
         let _ = unsafe { ShowWindowAsync(frame, SW_RESTORE) };
     }
