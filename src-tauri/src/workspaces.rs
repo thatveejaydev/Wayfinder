@@ -1,5 +1,5 @@
 use crate::{
-    next_shortcut_id, normalized_webpage, parent_depth, Shortcut, MAX_RINGS, MAX_SHORTCUTS,
+    next_shortcut_id, normalized_webpage, parent_depth, Shortcut, MAX_DEPTH, MAX_SHORTCUTS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -142,7 +142,7 @@ impl WorkspaceStore {
                 }
                 let depth = parent_depth(&workspace.shortcuts, parent_id)?;
                 match item.kind.as_str() {
-                    "submenu" if depth < MAX_RINGS - 1 => (),
+                    "submenu" if depth < MAX_DEPTH - 1 => (),
                     "text" if item.text.as_ref().is_some_and(|text| !text.is_empty()) => (),
                     "webpage" => {
                         normalized_webpage(&item.path)?;

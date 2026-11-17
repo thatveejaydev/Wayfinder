@@ -110,7 +110,7 @@ fn cursor_in_palette(app: &AppHandle) -> Option<(i32, i32)> {
 }
 
 const MAX_SHORTCUTS: usize = 12;
-const MAX_RINGS: usize = 3;
+const MAX_DEPTH: usize = 8;
 const MAX_PREVIEW_BYTES: u64 = 3 * 1024 * 1024;
 
 #[cfg(all(debug_assertions, target_os = "windows"))]
@@ -242,7 +242,7 @@ impl Appearance {
     fn clamped(mut self) -> Self {
         self.shell_size = self.shell_size.clamp(360, 760);
         self.icon_size = self.icon_size.clamp(20, 60);
-        self.text_size = self.text_size.clamp(8, 18);
+        self.text_size = self.text_size.clamp(8, 28);
         self.inner_radius = self.inner_radius.clamp(60, 156);
         self.border_thickness = self.border_thickness.clamp(0, 6);
         self.tile_corner_radius = self.tile_corner_radius.clamp(0, 30);
@@ -393,8 +393,8 @@ fn parent_depth(shortcuts: &[Shortcut], parent_id: Option<&str>) -> Result<usize
             .find(|item| item.id == id && item.kind == "submenu")
             .ok_or_else(|| "Submenu not found".to_string())?;
         depth += 1;
-        if depth >= MAX_RINGS {
-            return Err("Submenus are limited to three rings".into());
+        if depth >= MAX_DEPTH {
+            return Err("Submenus are limited to eight levels".into());
         }
         current = parent.parent_id.as_deref();
     }
@@ -482,8 +482,8 @@ fn create_tile(
     if sibling_count(shortcuts, parent_id.as_deref()) >= MAX_SHORTCUTS {
         return Err(format!("This ring is full ({MAX_SHORTCUTS} items)"));
     }
-    if kind == "submenu" && depth >= MAX_RINGS - 1 {
-        return Err("Submenus are limited to three rings".into());
+    if kind == "submenu" && depth >= MAX_DEPTH - 1 {
+        return Err("Submenus are limited to eight levels".into());
     }
     if kind == "folder" && name.trim().is_empty() {
         return Err("Enter a name for the folder tile".into());
@@ -592,9 +592,9 @@ fn edited_tile(
     if kind != "submenu" && sibling_count(shortcuts, Some(&existing.id)) > 0 {
         return Err("This submenu contains tiles. Empty it before changing its type".into());
     }
-    if kind == "submenu" && parent_depth(shortcuts, existing.parent_id.as_deref())? >= MAX_RINGS - 1
+    if kind == "submenu" && parent_depth(shortcuts, existing.parent_id.as_deref())? >= MAX_DEPTH - 1
     {
-        return Err("Submenus are limited to three rings".into());
+        return Err("Submenus are limited to eight levels".into());
     }
     let mut item = existing.clone();
     item.emoji = submenu_emoji(kind, value)?;
@@ -680,6 +680,92 @@ fn move_tile(shortcuts: &mut Vec<Shortcut>, id: &str, index: usize) -> Result<bo
     let destination = sibling_insert_position(shortcuts, tile.parent_id.as_deref(), index);
     shortcuts.insert(destination, tile);
     Ok(true)
+}
+
+/// How many submenu levels sit below `id` (0 when it has no nested submenus).
+fn nested_submenu_height(shortcuts: &[Shortcut], id: &str) -> usize {
+    let mut height = 0;
+    let mut level: Vec<&str> = vec![id];
+    let mut visited = std::collections::HashSet::from([id]);
+    loop {
+        let next: Vec<&str> = shortcuts
+            .iter()
+            .filter(|item| {
+                item.kind == "submenu"
+                    && item.parent_id.as_deref().is_some_and(|parent| level.contains(&parent))
+                    && visited.insert(item.id.as_str())
+            })
+            .map(|item| item.id.as_str())
+            .collect();
+        if next.is_empty() {
+            return height;
+        }
+        height += 1;
+        level = next;
+    }
+}
+
+/// Moves a tile, with any submenu contents, into another ring at `index`.
+fn move_tile_to_ring(
+    shortcuts: &mut Vec<Shortcut>,
+    id: &str,
+    parent_id: Option<&str>,
+    index: usize,
+) -> Result<bool, String> {
+    let position = shortcuts
+        .iter()
+        .position(|item| item.id == id)
+        .ok_or_else(|| "Shortcut not found".to_string())?;
+    if shortcuts[position].parent_id.as_deref() == parent_id {
+        return move_tile(shortcuts, id, index);
+    }
+    let mut ancestor = parent_id;
+    while let Some(ancestor_id) = ancestor {
+        if ancestor_id == id {
+            return Err("A submenu can't be moved inside itself".into());
+        }
+        ancestor = shortcuts
+            .iter()
+            .find(|item| item.id == ancestor_id)
+            .and_then(|item| item.parent_id.as_deref());
+    }
+    let depth = parent_depth(shortcuts, parent_id)?;
+    let count = sibling_count(shortcuts, parent_id);
+    if count >= MAX_SHORTCUTS {
+        return Err(format!("This ring is full ({MAX_SHORTCUTS} items)"));
+    }
+    if index > count {
+        return Err("That position is outside the ring".into());
+    }
+    if shortcuts[position].kind == "submenu"
+        && depth + nested_submenu_height(shortcuts, id) >= MAX_DEPTH - 1
+    {
+        return Err("Submenus are limited to eight levels".into());
+    }
+
+    let mut tile = shortcuts.remove(position);
+    tile.parent_id = parent_id.map(str::to_string);
+    let destination = sibling_insert_position(shortcuts, parent_id, index);
+    shortcuts.insert(destination, tile);
+    Ok(true)
+}
+
+#[tauri::command]
+fn move_tile_between_rings(
+    app: AppHandle,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
+    id: String,
+    parent_id: Option<String>,
+    index: usize,
+) -> Result<(), String> {
+    let mut store = state.lock().map_err(|e| e.to_string())?;
+    let shortcuts = store.edit_shortcuts(&workspace_id)?;
+    let mut updated = shortcuts.clone();
+    if move_tile_to_ring(&mut updated, &id, parent_id.as_deref(), index)? {
+        store.save_shortcuts(&app, &workspace_id, updated)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1672,6 +1758,7 @@ pub fn run() {
             create_tile,
             update_tile,
             reorder_tile,
+            move_tile_between_rings,
             pick_tile_path,
             open_emoji_picker,
             list_installed_apps,
@@ -1765,7 +1852,45 @@ mod tests {
         assert_eq!(name_only.name, "Projects");
         assert!(name_only.emoji.is_none());
         assert!(edited_tile(&items, &items[0], "text", "Root", "Example").is_err());
-        assert!(edited_tile(&items, &items[2], "submenu", "Nested", "").is_err());
+        assert!(edited_tile(&items, &items[2], "submenu", "Nested", "").is_ok());
+
+        let mut chain = vec![item("level-0", "submenu", None)];
+        for level in 1..MAX_DEPTH - 1 {
+            let parent = format!("level-{}", level - 1);
+            chain.push(item(&format!("level-{level}"), "submenu", Some(&parent)));
+        }
+        let deepest = format!("level-{}", MAX_DEPTH - 2);
+        assert_eq!(parent_depth(&chain, Some(&deepest)).unwrap(), MAX_DEPTH - 1);
+        let leaf = item("leaf", "text", Some(&deepest));
+        assert!(edited_tile(&chain, &leaf, "submenu", "Too deep", "").is_err());
+        chain.push(item("too-deep", "submenu", Some(&deepest)));
+        assert!(parent_depth(&chain, Some("too-deep")).is_err());
+
+        let mut tree = vec![
+            item("a", "submenu", None),
+            item("a-sub", "submenu", Some("a")),
+            item("a-leaf", "text", Some("a-sub")),
+            item("b", "submenu", None),
+            item("b-leaf", "text", Some("b")),
+        ];
+        assert_eq!(nested_submenu_height(&tree, "a"), 1);
+        assert!(move_tile_to_ring(&mut tree, "a", Some("a-sub"), 0).is_err());
+        assert!(move_tile_to_ring(&mut tree, "a", Some("a"), 0).is_err());
+        assert!(move_tile_to_ring(&mut tree, "a", Some("b"), 0).unwrap());
+        let b_children: Vec<_> = tree
+            .iter()
+            .filter(|item| item.parent_id.as_deref() == Some("b"))
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(b_children, ["a", "b-leaf"]);
+        assert_eq!(parent_depth(&tree, Some("a-sub")).unwrap(), 3);
+        assert!(move_tile_to_ring(&mut tree, "a-leaf", None, 1).unwrap());
+        assert_eq!(
+            tree.iter().filter(|item| item.parent_id.is_none()).map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            ["b", "a-leaf"]
+        );
+        assert!(move_tile_to_ring(&mut tree, "a-leaf", None, 3).is_err());
+        assert!(move_tile_to_ring(&mut chain, "level-1", Some("level-2"), 0).is_err());
 
         let edited = edited_tile(&items, &items[2], "webpage", "", "example.com").unwrap();
         assert_eq!(edited.id, items[2].id);

@@ -117,7 +117,7 @@ type AppearanceKey = Exclude<keyof Appearance, "theme" | "animations" | "openAtS
 const sliderDefinitions: { key: AppearanceKey; label: string; min: number; max: number; group: "Geometry" | "Spacing" }[] = [
   { key: "shellSize", label: "Tile size", min: 360, max: 760, group: "Geometry" },
   { key: "iconSize", label: "Icon size", min: 20, max: 60, group: "Geometry" },
-  { key: "textSize", label: "Text size", min: 8, max: 18, group: "Geometry" },
+  { key: "textSize", label: "Text size", min: 8, max: 28, group: "Geometry" },
   { key: "innerRadius", label: "Center opening", min: 60, max: 156, group: "Geometry" },
   { key: "borderThickness", label: "Border thickness", min: 0, max: 6, group: "Geometry" },
   { key: "tileCornerRadius", label: "Tile corner radius", min: 0, max: 30, group: "Geometry" },
@@ -134,6 +134,8 @@ const CENTER = 310;
 const OUTER = 231;
 const COLOR_LABEL_STROKE_WIDTH = 6;
 const MAX_ITEMS = 12;
+// Matches MAX_DEPTH in src-tauri/src/lib.rs: rings can nest this many levels deep.
+const MAX_DEPTH = 8;
 const MIN_SUBMENU_SPAN = 54;
 const RECENT_SHORTCUTS_KEY = "wayfinder.recent-shortcuts";
 const MAX_RECENT_SHORTCUTS = 100;
@@ -282,11 +284,21 @@ function cachedRingSegmentPaths(span: number, inner: number, outer: number, with
   return { key, paths };
 }
 
-function positionTile(button: HTMLButtonElement, radius: number, angle: number) {
+function positionTile(button: HTMLButtonElement, start: number, end: number, inner: number, outer: number) {
+  const radius = (inner + outer) / 2;
+  const angle = (start + end) / 2;
   const [x, y] = point(radius, angle);
   button.style.left = `${x / 620 * 100}%`;
   button.style.top = `${y / 620 * 100}%`;
   button.style.setProperty("--submenu-angle", `${angle}deg`);
+  // Fit the content box to the tile: the arc runs horizontally at the top and bottom of
+  // the palette, and the ring depth does at the sides.
+  const span = Math.min(end - start, 360) * Math.PI / 180;
+  const across = 2 * radius * Math.sin(Math.min(span, Math.PI) / 2) - 2 * appearance.tilePadding;
+  const depth = outer - inner - 2 * appearance.borderThickness;
+  const radians = angle * Math.PI / 180;
+  const width = Math.max(depth * 0.8, (across * Math.abs(Math.sin(radians)) + depth * Math.abs(Math.cos(radians))) * 0.82);
+  button.style.setProperty("--tile-width", `${Math.max(width, 40) / 620 * 100}%`);
 }
 
 function positionSegment(segment: SVGGElement, start: number, end: number, inner: number, outer: number) {
@@ -324,6 +336,46 @@ function loadShortcutIcon(item: Shortcut, container: HTMLElement, workspaceId: s
 
 function childrenOf(parentId: string | null): Shortcut[] {
   return shortcuts.filter((item) => (item.parentId ?? null) === parentId);
+}
+
+function ringDepth(parentId: string | null): number {
+  let depth = 0;
+  const visited = new Set<string>();
+  while (parentId && !visited.has(parentId)) {
+    visited.add(parentId);
+    depth += 1;
+    parentId = shortcuts.find((item) => item.id === parentId)?.parentId ?? null;
+  }
+  return depth;
+}
+
+function nestedSubmenuHeight(id: string): number {
+  let height = 0;
+  let level = new Set([id]);
+  const visited = new Set([id]);
+  for (;;) {
+    const next = new Set(shortcuts
+      .filter((item) => item.kind === "submenu" && level.has(item.parentId ?? "") && !visited.has(item.id))
+      .map((item) => item.id));
+    if (!next.size) return height;
+    next.forEach((nextId) => visited.add(nextId));
+    height += 1;
+    level = next;
+  }
+}
+
+/** Whether a ring can take a new tile of `kind`, or the tile `movingId` with everything inside it. */
+function ringAccepts(parentId: string | null, kind: Shortcut["kind"] | null, movingId?: string): boolean {
+  if (movingId) {
+    const visited = new Set<string>();
+    for (let ancestor = parentId; ancestor && !visited.has(ancestor);
+      ancestor = shortcuts.find((item) => item.id === ancestor)?.parentId ?? null) {
+      if (ancestor === movingId) return false;
+      visited.add(ancestor);
+    }
+  }
+  if (kind !== "submenu") return true;
+  return ringDepth(parentId) + (movingId ? nestedSubmenuHeight(movingId) : 0) < MAX_DEPTH - 1;
 }
 
 function visibleChildrenOf(parentId: string | null): Shortcut[] {
@@ -658,7 +710,12 @@ function submenuEdgeIndex(index: number, angle: number, [start, end, middle]: [n
   return offset < 0 ? index : index + 1;
 }
 
-function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = incomingTileKind): DropTarget | null {
+function dropTargetAt(
+  clientX: number,
+  clientY: number,
+  kind: Shortcut["kind"] | null = incomingTileKind,
+  movingId?: string,
+): DropTarget | null {
   if (tileDraft || workspaceHighlight !== null || searchQuery.trim()) return null;
   const position = palettePosition(clientX, clientY);
   if (!position) return null;
@@ -673,8 +730,7 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
     const center = menuCenter(parentId);
     if (center === null) continue;
     const items = childrenOf(parentId);
-    const deepest = level === 2 || focusedSubmenuId !== null;
-    if (!deepest && items.length) {
+    if (level < 2 && items.length) {
       const hoveredIndex = items.findIndex((_, index) => {
         const [start, end] = fanAngles(level, center, index, items.length);
         const near = angleNear(angle, center);
@@ -683,21 +739,23 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
       const hovered = items[hoveredIndex];
       if (hovered?.kind === "submenu") {
         const edgeIndex = submenuEdgeIndex(hoveredIndex, angle, fanAngles(level, center, hoveredIndex, items.length));
-        if (edgeIndex !== null && items.length < MAX_ITEMS) return { parentId, index: edgeIndex };
+        if (edgeIndex !== null && items.length < MAX_ITEMS) {
+          return ringAccepts(parentId, kind, movingId) ? { parentId, index: edgeIndex } : null;
+        }
+        if (hovered.id === movingId) return null;
         openSubmenu(hovered, level);
         const children = childrenOf(hovered.id);
-        if (kind === "submenu" || children.length >= MAX_ITEMS) return null;
+        if (!ringAccepts(hovered.id, kind, movingId) || children.length >= MAX_ITEMS) return null;
         return { parentId: hovered.id, index: children.length };
       }
     }
-    if (deepest && kind === "submenu") return null;
+    if (!ringAccepts(parentId, kind, movingId)) return null;
     const index = fanInsertionIndex(level, center, items.length, angle);
     return index === null ? null : { parentId, index };
   }
 
   if (focusedSubmenuId !== null) {
-    const focused = shortcuts.find((item) => item.id === focusedSubmenuId);
-    if (kind === "submenu" && focused?.parentId) return null;
+    if (!ringAccepts(focusedSubmenuId, kind, movingId)) return null;
     const index = insertionIndex(clientX, clientY);
     return index === null ? null : { parentId: focusedSubmenuId, index };
   }
@@ -710,9 +768,10 @@ function dropTargetAt(clientX: number, clientY: number, kind: TileKind | null = 
     if (hovered.kind === "submenu") {
       const edgeIndex = submenuEdgeIndex(hoveredIndex, angle, segmentAngles(hoveredIndex, roots.length));
       if (edgeIndex !== null && roots.length < MAX_ITEMS) return { parentId: null, index: edgeIndex };
+      if (hovered.id === movingId) return null;
       openSubmenu(hovered, 0);
       const children = childrenOf(hovered.id);
-      if (children.length >= MAX_ITEMS) return null;
+      if (!ringAccepts(hovered.id, kind, movingId) || children.length >= MAX_ITEMS) return null;
       return { parentId: hovered.id, index: children.length };
     }
   }
@@ -732,7 +791,7 @@ function updateDropIndicator(animate = true) {
   const placeholder = app.querySelector<SVGPathElement>(".root-drop-indicator");
   if (!placeholder) return;
   const roots = visibleChildrenOf(focusedSubmenuId);
-  const active = incomingTileKind !== null && incomingParentId === focusedSubmenuId && incomingIndex !== null && roots.length < MAX_ITEMS;
+  const active = (incomingTileKind !== null || Boolean(tileReorder?.move)) && incomingParentId === focusedSubmenuId && incomingIndex !== null && roots.length < MAX_ITEMS;
   const reorder = tileReorder?.level === 0 ? tileReorder : null;
   const previewIndex = reorder?.target ?? (active ? incomingIndex : null);
   const count = roots.length + (active ? 1 : 0);
@@ -763,9 +822,8 @@ function layoutRootTiles(target: [number, number][], from: [number, number][]) {
   const buttons = app.querySelectorAll<HTMLButtonElement>('.item-layer .shortcut[data-level="0"]');
   const paint = (angles: [number, number][]) => {
     angles.forEach(([start, end], index) => {
-      const middle = (start + end) / 2;
       if (paths[index]) positionSegment(paths[index], start, end, appearance.innerRadius, OUTER);
-      if (buttons[index]) positionTile(buttons[index], (OUTER + appearance.innerRadius) / 2, middle);
+      if (buttons[index]) positionTile(buttons[index], start, end, appearance.innerRadius, OUTER);
     });
     displayedAngles = angles;
   };
@@ -795,7 +853,7 @@ function updateChildDropIndicator(level: 1 | 2, animate = true) {
   if (center === null || !placeholder) return;
   const items = visibleChildrenOf(parentId);
   const ring = submenuRadii()[level - 1];
-  const active = incomingTileKind !== null && incomingParentId === parentId && incomingIndex !== null && items.length < MAX_ITEMS;
+  const active = (incomingTileKind !== null || Boolean(tileReorder?.move)) && incomingParentId === parentId && incomingIndex !== null && items.length < MAX_ITEMS;
   const reorder = tileReorder?.level === level ? tileReorder : null;
   const previewIndex = reorder?.target ?? (active ? incomingIndex : null);
   const count = items.length + (active ? 1 : 0);
@@ -822,9 +880,8 @@ function updateChildDropIndicator(level: 1 | 2, animate = true) {
   window.cancelAnimationFrame(childLayoutAnimations[level]);
   const paint = (angles: [number, number][]) => {
     angles.forEach(([start, end], index) => {
-      const middle = (start + end) / 2;
       if (paths[index]) positionSegment(paths[index], start, end, ring.inner, ring.outer);
-      if (buttons[index]) positionTile(buttons[index], (ring.inner + ring.outer) / 2, middle);
+      if (buttons[index]) positionTile(buttons[index], start, end, ring.inner, ring.outer);
     });
     displayedChildAngles[level] = angles;
   };
@@ -871,6 +928,10 @@ function clearDropTarget() {
 
 type TileReorder = {
   id: string;
+  kind: Shortcut["kind"];
+  parentId: string | null;
+  /** Set while the tile hovers a different ring than its own. */
+  move: DropTarget | null;
   level: 0 | 1 | 2;
   pointerId: number | null;
   startX: number;
@@ -889,12 +950,14 @@ function prepareTileReorder(event: PointerEvent, item: Shortcut, level: TileReor
   if (!editing || busy || incomingTileKind || tileReorder || event.button !== 0 || !event.isPrimary) return;
   const parentId = item.parentId ?? null;
   const siblings = childrenOf(parentId);
-  if (siblings.length < 2) return;
   const center = parentId ? menuCenter(parentId) : 0;
   if (center === null) return;
 
   tileReorder = {
     id: item.id,
+    kind: item.kind,
+    parentId,
+    move: null,
     level,
     pointerId: event.pointerId,
     startX: event.clientX,
@@ -911,6 +974,9 @@ function prepareTileReorder(event: PointerEvent, item: Shortcut, level: TileReor
 }
 
 function reorderIndexAt(drag: TileReorder, clientX: number, clientY: number): number | null {
+  // Opening another submenu while dragging can replace the ring the tile came from.
+  const ringParent = drag.level === 0 ? focusedSubmenuId : activeSubmenus[drag.level - 1] ?? null;
+  if (ringParent !== drag.parentId) return null;
   const position = palettePosition(clientX, clientY);
   if (!position) return null;
   const { radius, angle } = position;
@@ -921,6 +987,20 @@ function reorderIndexAt(drag: TileReorder, clientX: number, clientY: number): nu
     if (near >= start && near <= end) return index;
   }
   return null;
+}
+
+/** Dropping on the middle of a submenu in the tile's own ring moves the tile into that submenu. */
+function reorderIntoSubmenu(drag: TileReorder, clientX: number, clientY: number): DropTarget | null {
+  const index = reorderIndexAt(drag, clientX, clientY);
+  if (index === null) return null;
+  const target = childrenOf(drag.parentId)[index];
+  if (!target || target.kind !== "submenu" || target.id === drag.id) return null;
+  const position = palettePosition(clientX, clientY);
+  if (!position || submenuEdgeIndex(index, position.angle, drag.angles(index)) !== null) return null;
+  const children = childrenOf(target.id);
+  if (children.length >= MAX_ITEMS || !ringAccepts(target.id, drag.kind, drag.id)) return null;
+  openSubmenu(target, drag.level);
+  return { parentId: target.id, index: children.length };
 }
 
 function previewTileReorder(event: PointerEvent) {
@@ -937,8 +1017,26 @@ function previewTileReorder(event: PointerEvent) {
     app.setPointerCapture(event.pointerId);
     app.dataset.reorderLevel = String(drag.level);
   }
-  const index = reorderIndexAt(drag, event.clientX, event.clientY);
+  const into = reorderIntoSubmenu(drag, event.clientX, event.clientY);
+  const index = into ? null : reorderIndexAt(drag, event.clientX, event.clientY);
+  let move = into ?? (index === null ? dropTargetAt(event.clientX, event.clientY, drag.kind, drag.id) : null);
+  if (move?.parentId === drag.parentId) move = null;
+  setReorderMove(drag, move);
   setReorderTarget(drag, index);
+}
+
+function setReorderMove(drag: TileReorder, move: DropTarget | null) {
+  const previous = drag.move;
+  drag.move = move;
+  const dimmed = move !== null || drag.target !== null;
+  drag.path.classList.toggle("reorder-source", dimmed);
+  drag.button.classList.toggle("reorder-source", dimmed);
+  if (previous?.parentId === move?.parentId && previous?.index === move?.index) return;
+  incomingParentId = move?.parentId ?? null;
+  incomingIndex = move?.index ?? null;
+  updateDropIndicator();
+  updateChildDropIndicator(1);
+  updateChildDropIndicator(2);
 }
 
 function updateReorderLayout(level: TileReorder["level"], animate = true) {
@@ -949,8 +1047,8 @@ function updateReorderLayout(level: TileReorder["level"], animate = true) {
 function setReorderTarget(drag: TileReorder, index: number | null) {
   if (drag.target === index) return;
   drag.target = index;
-  drag.path.classList.toggle("reorder-source", index !== null);
-  drag.button.classList.toggle("reorder-source", index !== null);
+  drag.path.classList.toggle("reorder-source", index !== null || drag.move !== null);
+  drag.button.classList.toggle("reorder-source", index !== null || drag.move !== null);
   updateReorderLayout(drag.level);
 }
 
@@ -963,23 +1061,39 @@ function cancelTileReorder(restoreLayout = true) {
   delete app.dataset.reorderLevel;
   drag.path.classList.remove("reorder-source");
   drag.button.classList.remove("reorder-source");
+  if (drag.move) {
+    drag.move = null;
+    clearDropTarget();
+  }
   if (restoreLayout) updateReorderLayout(drag.level, false);
 }
 
 async function finishTileReorder(event: PointerEvent) {
   const drag = tileReorder;
   if (!drag || drag.pointerId !== event.pointerId) return;
-  const index = drag.started ? reorderIndexAt(drag, event.clientX, event.clientY) : null;
-  if (index === null || index === drag.from) {
+  const into = drag.started ? reorderIntoSubmenu(drag, event.clientX, event.clientY) : null;
+  const index = drag.started && !into ? reorderIndexAt(drag, event.clientX, event.clientY) : null;
+  const move = into ?? (drag.started && index === null ? drag.move : null);
+  if (move === null && (index === null || index === drag.from)) {
     cancelTileReorder();
     return;
   }
-  setReorderTarget(drag, index);
+  if (index !== null) setReorderTarget(drag, index);
   drag.pointerId = null;
   if (app.hasPointerCapture(event.pointerId)) app.releasePointerCapture(event.pointerId);
   busy = true;
   try {
-    await invoke("reorder_tile", { id: drag.id, index, workspaceId: workspaceList.activeId });
+    if (move) {
+      await invoke("move_tile_between_rings", {
+        id: drag.id, parentId: move.parentId, index: move.index, workspaceId: workspaceList.activeId,
+      });
+      tileReorder = null;
+      incomingParentId = null;
+      incomingIndex = null;
+      delete app.dataset.reorderLevel;
+    } else {
+      await invoke("reorder_tile", { id: drag.id, index, workspaceId: workspaceList.activeId });
+    }
     await refreshWorkspacePalette();
     render();
   } catch (error) {
@@ -1080,10 +1194,9 @@ function appendTile(
   const selected = editing && !searching && !previewWorkspaceId && selectedTileId === item.id;
   const name = shortcutName(item);
   const focusesSubmenu = !editing && item.kind === "submenu";
-  const action = focusesSubmenu ? "Focus" : previewWorkspaceId ? "Preview" : editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
+  const action = focusesSubmenu ? "Open" : previewWorkspaceId ? "Preview" : editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
   const location = result ? ` · ${result.breadcrumb}` : "";
   const labelText = `${action} ${name}${location}`;
-  const tooltip = focusesSubmenu ? `${labelText} (Shift+click)` : labelText;
   const searchKey = result ? `search:${result.id}` : undefined;
   const poolKey = searchKey ?? `${level}:${item.id}`;
   const signature = `${item.kind}\0${item.name}\0${item.path}\0${item.text ?? ""}\0${item.color ?? ""}\0${item.emoji ?? ""}\0${item.preview ?? ""}\0${editing ? 1 : 0}\0${searching ? 1 : 0}`;
@@ -1101,11 +1214,11 @@ function appendTile(
     path.classList.toggle("search-selected", searchSelected);
     path.classList.remove("hovered", "reorder-source");
 
-    positionTile(button, (innerRadius + outerRadius) / 2, middle);
+    positionTile(button, start, end, innerRadius, outerRadius);
     button.classList.toggle("active-submenu", activeSubmenu);
     button.classList.remove("hovered", "reorder-source");
     button.setAttribute("aria-label", labelText);
-    button.title = tooltip;
+    button.title = labelText;
     if (searchSelected) button.setAttribute("aria-current", "true");
     else button.removeAttribute("aria-current");
     if (editing) button.setAttribute("aria-pressed", String(selected));
@@ -1153,11 +1266,11 @@ function appendTile(
   button.dataset.level = String(level);
   button.type = "button";
   if (previewWorkspaceId) button.tabIndex = -1;
-  positionTile(button, (innerRadius + outerRadius) / 2, middle);
+  positionTile(button, start, end, innerRadius, outerRadius);
   button.setAttribute("aria-label", labelText);
   if (searchSelected) button.setAttribute("aria-current", "true");
   if (editing && !previewWorkspaceId) button.setAttribute("aria-pressed", String(selected));
-  button.title = tooltip;
+  button.title = labelText;
   let tileIcon = "";
   if (item.kind === "submenu") {
     const offset = (outerRadius - innerRadius) / 2 - 12;
@@ -1629,7 +1742,6 @@ function backFromFocus(destination: "parent" | "root") {
 
 async function activate(item: Shortcut, level: number, shiftKey: boolean, workspaceId = workspaceList.activeId) {
   if (busy || workspaceChanging) return;
-  if (!editing && item.kind === "submenu" && !shiftKey) return;
   const shouldSwitchWorkspace = workspaceHighlight !== null || editing || item.kind === "submenu";
   if (workspaceId !== workspaceList.activeId && shouldSwitchWorkspace) {
     if (!await switchWorkspace(workspaceId)) return;
@@ -1637,9 +1749,16 @@ async function activate(item: Shortcut, level: number, shiftKey: boolean, worksp
   closeWorkspacePicker();
   if (editing) {
     selectedTileId = item.id;
-    if (item.kind !== "submenu") activeSubmenus = activeSubmenus.slice(0, level);
-    if (!openSubmenu(item, level)) render();
-    await invoke("select_tile_for_edit", { id: item.id, level, workspaceId })
+    if (item.kind === "submenu" && level >= 2) {
+      // The outermost visible ring cannot fan out further, so re-center on the submenu instead.
+      focusedSubmenuId = item.id;
+      activeSubmenus = [];
+      render();
+    } else {
+      if (item.kind !== "submenu") activeSubmenus = activeSubmenus.slice(0, level);
+      if (!openSubmenu(item, level)) render();
+    }
+    await invoke("select_tile_for_edit", { id: item.id, level: ringDepth(item.parentId ?? null), workspaceId })
       .catch((error) => showToast(String(error), true));
     return;
   }
@@ -1910,7 +2029,7 @@ function selectedTileForm(selection: TileSelection) {
     <form id="tile-edit-form" class="tile-form tile-edit-form" aria-label="Selected tile">
       <label for="edit-tile-kind">Type</label>
       <select id="edit-tile-kind" name="kind">
-        ${types.filter(({ kind }) => kind !== "submenu" || selection.level < 2).map(({ kind, label }) => `<option value="${kind}">${label}</option>`).join("")}
+        ${types.filter(({ kind }) => kind !== "submenu" || selection.level < MAX_DEPTH - 1).map(({ kind, label }) => `<option value="${kind}">${label}</option>`).join("")}
       </select>
       <label for="edit-tile-name">Name <small class="tile-name-hint" hidden></small></label>
       <input id="edit-tile-name" name="name" type="text" maxlength="80" autocomplete="off" />
