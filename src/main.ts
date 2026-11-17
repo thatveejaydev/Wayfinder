@@ -3,6 +3,7 @@ import { emitTo, listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { version as appVersion } from "../src-tauri/tauri.conf.json";
+import { bindIconPicker, iconPickerField, iconSvg, isIconId, showIcon } from "./icons";
 import { indexShortcut, rankShortcutMatches } from "./shortcut_search";
 import tailwindColorTokens from "./tailwind_colors.json";
 import "./style.css";
@@ -40,7 +41,7 @@ function tileLabelColor(value?: string | null): string | null {
 
 const tileNameHints: Partial<Record<EditableTileKind, string>> = {
   app: "(Leave blank for icon only)",
-  submenu: "(Leave blank for emoji only)",
+  submenu: "(Leave blank for icon only)",
   text: "(Optional · defaults to the first 12 characters)",
   webpage: "(Leave blank for icon only)",
 };
@@ -243,27 +244,23 @@ systemTheme.addEventListener("change", () => {
   if (appearance.theme.mode === "system") applyPreferences();
 });
 
+// Lucide icons for each tile kind. App and webpage tiles replace theirs with the app
+// icon or site favicon once it loads; folders and other files keep these.
+const kindIcons: Record<Shortcut["kind"], string> = {
+  text: "text-align-start",
+  webpage: "globe",
+  app: "app-window",
+  folder: "folder",
+  image: "file-image",
+  pdf: "file-text",
+  video: "file-video-camera",
+  audio: "file-music",
+  file: "file",
+  submenu: "chevrons-right",
+};
+
 function icon(kind: Shortcut["kind"]): string {
-  switch (kind) {
-    case "text":
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><rect x="8" y="7" width="32" height="34" rx="5" fill="#7795c9"/><path d="M15 18h18M15 24h18M15 30h12" stroke="white" stroke-width="3" stroke-linecap="round"/></svg>`;
-    case "webpage":
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="18" fill="#5d9edb"/><path d="M7 24h34M24 6c-5 5-8 11-8 18s3 13 8 18M24 6c5 5 8 11 8 18s-3 13-8 18" fill="none" stroke="white" stroke-width="2"/></svg>`;
-    case "app":
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><rect x="6" y="7" width="36" height="34" rx="6" fill="#7772cc"/><path d="M6 17h36M15 12h1M21 12h1M17 28l5 5 9-11" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-    case "folder":
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><path d="M5 13a4 4 0 0 1 4-4h11l4 4h15a4 4 0 0 1 4 4v4H5z" fill="#efad22"/><path d="M5 20a4 4 0 0 1 4-4h30a4 4 0 0 1 4 4v18a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z" fill="#ffd46a"/></svg>`;
-    case "image":
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><rect x="6" y="8" width="36" height="32" rx="5" fill="#8069b7"/><circle cx="17" cy="18" r="4" fill="#dbc5ff"/><path d="m9 35 11-12 7 7 5-5 8 10" fill="none" stroke="#e7d9ff" stroke-width="3" stroke-linejoin="round"/></svg>`;
-    case "pdf":
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><path d="M12 5h17l8 8v29H12a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3z" fill="#f07875"/><path d="M29 5v8h8" fill="#ffc2bf"/><text x="24" y="32" text-anchor="middle" fill="white" font-size="12" font-weight="700">PDF</text></svg>`;
-    case "video":
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><rect x="5" y="9" width="38" height="30" rx="6" fill="#627fe8"/><path d="m20 16 13 8-13 8z" fill="white"/></svg>`;
-    case "audio":
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="19" fill="#39b9a5"/><path d="M28 12v18a5 5 0 1 1-3-5V16l10-3v14a5 5 0 1 1-3-5V11z" fill="white"/></svg>`;
-    default:
-      return `<svg viewBox="0 0 48 48" aria-hidden="true"><path d="M12 5h16l9 9v27a3 3 0 0 1-3 3H12a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3z" fill="#7e9cab"/><path d="M28 5v9h9" fill="#bfd4df"/><path d="M16 24h16M16 30h13" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>`;
-  }
+  return iconSvg(kindIcons[kind] ?? "file", "kind-icon", 1.75);
 }
 
 function point(radius: number, angle: number): [number, number] {
@@ -389,7 +386,7 @@ function visibleChildrenOf(parentId: string | null): Shortcut[] {
 }
 
 function shortcutName(item: Pick<Shortcut, "kind" | "name" | "path" | "text" | "emoji">): string {
-  if (item.kind === "submenu") return item.name || item.emoji || "Submenu";
+  if (item.kind === "submenu") return item.name || (isIconId(item.emoji) ? "" : item.emoji) || "Submenu";
   if (item.kind === "text" && !item.name) {
     return Array.from(item.text?.trimStart() ?? "").slice(0, 12).join("").trimEnd() || "Whitespace";
   }
@@ -1276,7 +1273,7 @@ function appendTile(
     const offset = (outerRadius - innerRadius) / 2 - 12;
     button.style.setProperty("--submenu-chevron-offset", String(offset / 620));
     tileIcon = '<svg class="submenu-chevron" viewBox="0 0 8 16" aria-hidden="true"><path d="M0 0 8 8 0 16Z" fill="currentColor"/></svg>';
-    if (emoji) tileIcon += '<span class="submenu-emoji" aria-hidden="true"></span>';
+    if (emoji) tileIcon += '<span class="submenu-icon" aria-hidden="true"></span>';
   } else if (item.kind !== "text") {
     const thumbnail = item.preview
       ? `<img class="shortcut-image" alt="" src="${item.preview}"/>`
@@ -1287,7 +1284,7 @@ function appendTile(
   if (draft && !draftHasValue) tileIcon = "";
   const showLabel = item.name || (draft ? draftHasValue && !item.emoji : item.kind === "text" || searching);
   button.innerHTML = `${tileIcon}${showLabel ? '<span class="shortcut-label"></span>' : ""}${result ? '<span class="shortcut-workspace"></span>' : ""}`;
-  if (emoji) button.querySelector<HTMLElement>(".submenu-emoji")!.textContent = emoji;
+  if (emoji) showIcon(button.querySelector<HTMLElement>(".submenu-icon")!, emoji);
   if (result) button.querySelector<HTMLElement>(".shortcut-workspace")!.textContent = result.workspace.name;
   if (!draft && !item.preview && (item.kind === "app" || item.kind === "webpage" || item.kind === "image")) {
     loadShortcutIcon(item, button.querySelector<HTMLElement>(".shortcut-icon")!, workspaceId,
@@ -1517,7 +1514,7 @@ function renderWorkspacePicker() {
     if (workspace.id === workspaceList.activeId) button.setAttribute("aria-current", "true");
     const icon = document.createElement("span");
     icon.setAttribute("aria-hidden", "true");
-    icon.textContent = workspace.icon;
+    showIcon(icon, workspace.icon);
     button.append(icon);
     button.addEventListener("pointerenter", () => { caption.textContent = workspace.name; });
     button.addEventListener("pointerleave", () => { caption.textContent = highlightedName; });
@@ -1651,7 +1648,7 @@ function render(transition?: "opening" | "search" | "workspace-preview") {
   const workspace = workspaceList.workspaces.find(({ id }) => id === visibleWorkspaceId);
   const badge = palette.querySelector<HTMLElement>(".workspace-badge")!;
   badge.hidden = searching || Boolean(focused) || !workspace;
-  badge.textContent = workspace?.icon ?? "";
+  showIcon(badge, workspace?.icon);
   badge.title = workspace?.name ?? "";
   badge.setAttribute("aria-label", workspace ? `${workspacePreview ? "Workspace preview" : "Active workspace"}: ${workspace.name}` : "");
 
@@ -1815,31 +1812,8 @@ async function addDroppedPaths(paths: string[], target: DropTarget | null, works
   }
 }
 
-function bindEmojiField(field: HTMLInputElement, picker: HTMLButtonElement, error: HTMLElement) {
-  const graphemes = new Intl.Segmenter();
-  field.addEventListener("input", () => {
-    const emoji = field.value.trim();
-    const valid = !emoji || (Array.from(graphemes.segment(emoji)).length === 1 && /[\p{Extended_Pictographic}\p{Emoji_Presentation}\u20e3]/u.test(emoji));
-    field.setCustomValidity(valid ? "" : "Choose one emoji for the icon.");
-  });
-  picker.addEventListener("click", () => {
-    error.textContent = "";
-    field.focus();
-    field.select();
-    void invoke("open_emoji_picker").catch((failure) => {
-      if (field.isConnected) error.textContent = String(failure);
-    });
-  });
-}
-
 function tileValueFields(kind: EditableTileKind, id: string) {
-  if (kind === "submenu") return `
-    <label for="${id}">Emoji icon <small class="tile-name-hint">(Optional)</small></label>
-    <div class="tile-path-row">
-      <input id="${id}" class="tile-emoji-input" name="value" type="text" autocomplete="off" spellcheck="false" aria-describedby="${id}-emoji-help" />
-      <button class="tile-browse tile-emoji-picker" type="button">Pick emoji</button>
-    </div>
-    <p id="${id}-emoji-help">Press Win + . in the field to open the Windows emoji picker.</p>`;
+  if (kind === "submenu") return iconPickerField(id, "Icon");
   if (kind === "text") return `
     <label for="${id}">Text to copy</label>
     <textarea id="${id}" name="value" rows="5" placeholder="Type or paste text here" required></textarea>`;
@@ -1891,11 +1865,7 @@ function bindTileValueFields(form: HTMLFormElement, fields: HTMLElement, kind: E
       appSearch.placeholder = "Browse or paste an app path below";
     });
   }
-  if (kind === "submenu" && value instanceof HTMLInputElement) {
-    bindEmojiField(value, fields.querySelector<HTMLButtonElement>(".tile-emoji-picker")!,
-      form.querySelector<HTMLElement>(".tile-form-error")!);
-    return value;
-  }
+  if (kind === "submenu") return bindIconPicker(fields);
   fields.querySelector<HTMLButtonElement>(".tile-browse")?.addEventListener("click", async () => {
     try {
       const path = await invoke<string | null>("pick_tile_path", { kind });
@@ -1995,24 +1965,24 @@ function bindTileColor(form: HTMLFormElement, color?: string | null, onChange?: 
   return () => selected;
 }
 
-const settingsIconPaths = {
-  about: "M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0zM12 11v5m0-8h.01",
-  tiles: "M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z",
-  "edit-tile": "m13.5 6.5 4 4M4 20l4.5-1 11-11a2.8 2.8 0 0 0-4-4l-11 11L4 20z",
-  workspace: "M3 7h18v13H3zM8 7V4h8v3M3 12h18m-11 0v2h4v-2",
-  appearance: "M3 6h5m4 0h9M3 12h9m4 0h5M3 18h3m4 0h11M8 4v4m8 2v4M6 16v4",
-  misc: "M9 7v10a2 2 0 1 1-2-2h10a2 2 0 1 1-2 2V7a2 2 0 1 1 2 2H7a2 2 0 1 1 2-2z",
-  submenu: "m6 6 6 6-6 6m6-12 6 6-6 6",
-  text: "M4 6h16M4 10h12M4 14h16M4 18h12",
-  folder: "M3 6a2 2 0 0 1 2-2h4l3 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
-  webpage: "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3a13 13 0 0 0 0 18 13 13 0 0 0 0-18z",
-  app: "M3 5h18v14H3zM3 9h18m-14-2h.01m3 0h.01",
-  file: "M6 3h8l4 4v14H6zM14 3v5h4M9 12h6m-6 4h6",
-  grip: "M9 5h.01m6 0h.01M9 12h.01m6 0h.01M9 19h.01m6 0h.01",
+const settingsIcons = {
+  about: "info",
+  tiles: "layout-grid",
+  "edit-tile": "pencil",
+  workspace: "briefcase",
+  appearance: "sliders-horizontal",
+  misc: "command",
+  submenu: kindIcons.submenu,
+  text: kindIcons.text,
+  folder: kindIcons.folder,
+  webpage: kindIcons.webpage,
+  app: kindIcons.app,
+  file: kindIcons.file,
+  grip: "grip-vertical",
 };
 
-function settingsIcon(name: keyof typeof settingsIconPaths) {
-  return `<svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${settingsIconPaths[name]}"/></svg>`;
+function settingsIcon(name: keyof typeof settingsIcons) {
+  return iconSvg(settingsIcons[name], "settings-icon", 1.75);
 }
 
 function settingsHeading(title: string, description: string) {
@@ -2227,11 +2197,7 @@ function workspaceSettings() {
       <form id="workspace-form" class="tile-form tile-edit-form">
         <label for="workspace-name">Name</label>
         <input id="workspace-name" required maxlength="80" autocomplete="off" />
-        <label for="workspace-icon">Emoji icon <small class="tile-name-hint">(Optional)</small></label>
-        <div class="tile-path-row">
-          <input id="workspace-icon" class="tile-emoji-input" type="text" autocomplete="off" spellcheck="false" />
-          <button type="button" class="tile-browse workspace-emoji-picker">Pick emoji</button>
-        </div>
+        <div class="workspace-icon-field">${iconPickerField("workspace-icon", "Icon")}</div>
         <div class="tile-form-error" role="alert"></div>
         <div class="tile-form-actions">
           <button type="button" class="tile-cancel">Cancel</button>
@@ -2304,7 +2270,7 @@ function bindWorkspaceSettings(panel: HTMLElement) {
     const workspace = workspaceList.workspaces[index];
     row.dataset.workspaceId = workspace.id;
     row.querySelector<HTMLElement>(".workspace-row-name")!.textContent = workspace.name;
-    row.querySelector<HTMLElement>(".workspace-row-icon")!.textContent = workspace.icon;
+    showIcon(row.querySelector<HTMLElement>(".workspace-row-icon")!, workspace.icon);
     const bind = (action: string, label: string, click: () => void) => {
       const button = row.querySelector<HTMLButtonElement>(`[data-action="${action}"]`);
       button?.setAttribute("aria-label", `${label} ${workspace.name}`);
@@ -2327,13 +2293,12 @@ function bindWorkspaceSettings(panel: HTMLElement) {
   const draft = workspaceDraft;
   if (form && draft) {
     const name = form.querySelector<HTMLInputElement>("#workspace-name")!;
-    const icon = form.querySelector<HTMLInputElement>("#workspace-icon")!;
+    const icon = bindIconPicker(form.querySelector<HTMLElement>(".workspace-icon-field")!);
     name.value = draft.name;
     icon.value = draft.icon;
+    icon.dispatchEvent(new Event("input"));
     name.addEventListener("input", () => { draft.name = name.value; });
     icon.addEventListener("input", () => { draft.icon = icon.value; });
-    bindEmojiField(icon, form.querySelector<HTMLButtonElement>(".workspace-emoji-picker")!,
-      form.querySelector<HTMLElement>(".tile-form-error")!);
     form.querySelector(".tile-cancel")!.addEventListener("click", () => showForm(null));
     form.addEventListener("submit", (event) => {
       event.preventDefault();

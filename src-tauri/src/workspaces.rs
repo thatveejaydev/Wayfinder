@@ -80,13 +80,13 @@ fn workspace_info(id: String, name: String, icon: String) -> Result<WorkspaceInf
         return Err("Enter a workspace name of up to 80 characters".into());
     }
     if icon.len() > 128 || icon.chars().any(char::is_control) {
-        return Err("Choose one emoji for the workspace icon".into());
+        return Err("Choose an icon for the workspace".into());
     }
     Ok(WorkspaceInfo {
         id,
         name: name.into(),
         icon: if icon.is_empty() {
-            "🗂️".into()
+            "layers".into()
         } else {
             icon.into()
         },
@@ -197,7 +197,7 @@ impl WorkspaceStore {
                         info: WorkspaceInfo {
                             id: "default".into(),
                             name: "Default".into(),
-                            icon: "🗂️".into(),
+                            icon: "layers".into(),
                         },
                         shortcuts,
                     }],

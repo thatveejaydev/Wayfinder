@@ -534,7 +534,7 @@ fn submenu_emoji(kind: &str, value: &str) -> Result<Option<String>, String> {
         return Ok(None);
     }
     if value.len() > 128 || value.chars().any(char::is_control) {
-        return Err("Choose one emoji for the submenu icon".into());
+        return Err("Choose an icon for the submenu".into());
     }
     Ok(Some(value.to_string()))
 }
@@ -783,33 +783,6 @@ fn reorder_tile(
         store.save_shortcuts(&app, &workspace_id, updated)?;
     }
     Ok(())
-}
-
-#[tauri::command]
-fn open_emoji_picker(app: AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::UI::{
-            Input::KeyboardAndMouse::{VK_LWIN, VK_OEM_PERIOD},
-            WindowsAndMessaging::GetForegroundWindow,
-        };
-
-        let editor = app
-            .get_webview_window("editor")
-            .ok_or_else(|| "Settings window not found".to_string())?;
-        let hwnd = editor.hwnd().map_err(|error| error.to_string())?;
-        if unsafe { GetForegroundWindow() }.0 == hwnd.0
-            && keyboard::send_shortcut(VK_LWIN, VK_OEM_PERIOD)
-        {
-            return Ok(());
-        }
-        Err("Focus the emoji field and press Win + . to open the emoji picker.".into())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = app;
-        Err("Use your system emoji picker in the emoji field.".into())
-    }
 }
 
 #[tauri::command]
@@ -1760,7 +1733,6 @@ pub fn run() {
             reorder_tile,
             move_tile_between_rings,
             pick_tile_path,
-            open_emoji_picker,
             list_installed_apps,
             begin_tile_drag,
             end_tile_drag,
