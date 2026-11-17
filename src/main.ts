@@ -2822,12 +2822,35 @@ async function startEditor() {
       if (saveTimer) scheduleAppearanceSave(true);
       await saveQueue;
       try {
-        await editor.destroy();
+        // Hide rather than destroy, so the next Ctrl+, shows this page without reloading it.
+        await invoke("hide_settings");
       } catch (error) {
         closing = false;
         app.inert = false;
         showSettingsNotification(`Could not close Settings: ${String(error)}`, true);
       }
+    });
+    await listen("settings-hidden", async () => {
+      // Start the next session the way a newly opened window would.
+      closing = false;
+      app.inert = false;
+      editorTab = "tiles";
+      tileForm = null;
+      selectedTile = null;
+      workspaceDraft = null;
+      workspaceDeleteId = null;
+      try {
+        [appearance, paletteHotkey] = await Promise.all([
+          invoke<Appearance>("get_appearance"),
+          invoke<string | null>("get_palette_hotkey"),
+        ]);
+        applyEditorWorkspaces(await invoke<WorkspaceList>("get_workspaces"));
+      } catch (error) {
+        console.error("Could not refresh Settings:", error);
+      }
+      app.replaceChildren();
+      renderEditor();
+      app.scrollTop = 0;
     });
     await listen("workspaces-changed", () => {
       void invoke<WorkspaceList>("get_workspaces").then(applyEditorWorkspaces).catch((error) => {

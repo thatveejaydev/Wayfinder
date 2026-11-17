@@ -5,7 +5,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         LazyLock, Mutex,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -38,6 +38,13 @@ mod workspaces;
 use workspaces::WorkspaceStore;
 
 static OPEN_FILE_PICKERS: AtomicUsize = AtomicUsize::new(0);
+// The settings window is created hidden at startup and hidden again when closed, so
+// Ctrl+, shows an already-loaded page instead of starting a new WebView each time.
+/// Settings is open or opening.
+static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
+/// The settings page has loaded and can be shown at once.
+static SETTINGS_READY: AtomicBool = AtomicBool::new(false);
+static CREATING_SETTINGS: Mutex<()> = Mutex::new(());
 #[cfg(target_os = "windows")]
 static PALETTE_ORIGIN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static TAILWIND_COLORS: LazyLock<HashSet<String>> = LazyLock::new(|| {
@@ -1221,24 +1228,50 @@ async fn open_shortcut(
     }
 }
 
-#[tauri::command]
-fn present_settings(app: AppHandle) -> Result<(), String> {
+fn show_settings(app: &AppHandle) -> Result<(), String> {
     let editor = app
         .get_webview_window("editor")
         .ok_or_else(|| "Edit window not found".to_string())?;
-    if !palette_is_open(&app) {
-        return editor.close().map_err(|error| error.to_string());
-    }
     let _ = fit_editor_height(app.clone(), 0);
-    position_editor(&app);
+    position_editor(app);
     editor.show().map_err(|e| e.to_string())?;
     editor.set_focus().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(collect_installed_apps);
     app.emit_to("main", "editor-opened", ())
         .map_err(|e| e.to_string())
 }
 
+/// Called by the settings page once it has loaded.
+#[tauri::command]
+fn present_settings(app: AppHandle) -> Result<(), String> {
+    SETTINGS_READY.store(true, Ordering::SeqCst);
+    if !SETTINGS_OPEN.load(Ordering::SeqCst) {
+        // Preloaded in the background; stay hidden until Ctrl+, asks for it.
+        return Ok(());
+    }
+    if !palette_is_open(&app) {
+        return hide_settings(app);
+    }
+    show_settings(&app)
+}
+
+/// Called by the settings page after it saves pending changes on close.
+#[tauri::command]
+fn hide_settings(app: AppHandle) -> Result<(), String> {
+    SETTINGS_OPEN.store(false, Ordering::SeqCst);
+    if let Some(editor) = app.get_webview_window("editor") {
+        editor.hide().map_err(|error| error.to_string())?;
+    }
+    let _ = app.emit_to("editor", "settings-hidden", ());
+    app.emit_to("main", "editor-closed", ())
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn request_settings_close(app: AppHandle) -> Result<(), String> {
+    if !SETTINGS_OPEN.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     if let Some(editor) = app.get_webview_window("editor") {
         editor.close().map_err(|error| error.to_string())?;
     }
@@ -1536,10 +1569,13 @@ fn dismiss_palette(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
-    if let Some(editor) = app.get_webview_window("editor") {
-        let _ = editor.close();
-    } else {
-        let _ = app.emit_to("main", "editor-closed", ());
+    match app.get_webview_window("editor") {
+        Some(editor) if SETTINGS_OPEN.load(Ordering::SeqCst) => {
+            let _ = editor.close();
+        }
+        _ => {
+            let _ = app.emit_to("main", "editor-closed", ());
+        }
     }
 }
 
@@ -1551,7 +1587,8 @@ fn file_picker_open() -> bool {
 #[cfg(target_os = "windows")]
 fn keep_palette_open(app: &AppHandle) -> bool {
     // Settings can take focus before its window reports that it is visible.
-    file_picker_open() || app.get_webview_window("editor").is_some()
+    let _ = app;
+    file_picker_open() || SETTINGS_OPEN.load(Ordering::SeqCst)
 }
 
 #[cfg(target_os = "windows")]
@@ -1591,8 +1628,6 @@ fn palette_is_open(app: &AppHandle) -> bool {
 }
 
 fn open_settings(app: &AppHandle) {
-    static CREATING_SETTINGS: Mutex<()> = Mutex::new(());
-
     if !palette_is_open(app) {
         return;
     }
@@ -1611,24 +1646,51 @@ fn open_settings(app: &AppHandle) {
                     let _ = editor.unminimize();
                 }
                 let _ = editor.set_focus();
+                return;
+            }
+            SETTINGS_OPEN.store(true, Ordering::SeqCst);
+            // A page that is still loading shows itself through present_settings.
+            if SETTINGS_READY.load(Ordering::SeqCst) {
+                if let Err(error) = show_settings(&app) {
+                    eprintln!("Could not show Settings: {error}");
+                }
             }
             return;
         }
-        let Some(config) = app
-            .config()
-            .app
-            .windows
-            .iter()
-            .find(|window| window.label == "editor")
-        else {
-            eprintln!("Settings window configuration is missing");
+        SETTINGS_OPEN.store(true, Ordering::SeqCst);
+        if let Err(error) = create_settings_window(&app) {
+            SETTINGS_OPEN.store(false, Ordering::SeqCst);
+            eprintln!("Could not open Settings: {error}");
+        }
+    });
+}
+
+/// Creates the hidden settings window. Call with `CREATING_SETTINGS` held.
+fn create_settings_window(app: &AppHandle) -> Result<(), String> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "editor")
+        .ok_or("Settings window configuration is missing")?;
+    SETTINGS_READY.store(false, Ordering::SeqCst);
+    WebviewWindowBuilder::from_config(app, config)
+        .and_then(|builder| builder.build())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn preload_settings(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(_creation) = CREATING_SETTINGS.lock() else {
             return;
         };
-        match WebviewWindowBuilder::from_config(&app, config).and_then(|builder| builder.build()) {
-            Ok(_) => {
-                tauri::async_runtime::spawn_blocking(collect_installed_apps);
+        if app.get_webview_window("editor").is_none() {
+            if let Err(error) = create_settings_window(&app) {
+                eprintln!("Could not preload Settings: {error}");
             }
-            Err(error) => eprintln!("Could not open Settings: {error}"),
         }
     });
 }
@@ -1665,6 +1727,7 @@ pub fn run() {
             }
             mouse_hotkey::init(app.handle());
             app.manage(init_palette_hotkey(app.handle()));
+            preload_settings(app.handle());
 
             let show = MenuItem::with_id(app, "show", "Show palette", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -1692,6 +1755,9 @@ pub fn run() {
                 }
             }
             WindowEvent::Destroyed if window.label() == "editor" => {
+                // Recreated on the next Ctrl+,.
+                SETTINGS_OPEN.store(false, Ordering::SeqCst);
+                SETTINGS_READY.store(false, Ordering::SeqCst);
                 let _ = window.app_handle().emit_to("main", "editor-closed", ());
             }
             #[cfg(target_os = "windows")]
@@ -1719,6 +1785,7 @@ pub fn run() {
             remove_shortcut,
             open_shortcut,
             present_settings,
+            hide_settings,
             request_settings_close,
             fit_editor_height,
             get_appearance,

@@ -1,16 +1,10 @@
-/// <reference types="vite/client" />
-// Lucide (https://lucide.dev, ISC license). One module per icon, named by its canonical
-// id, so the picker lists each icon once rather than once per legacy alias.
-type IconNode = [tag: string, attrs: Record<string, string | number | undefined>][];
+// Lucide (https://lucide.dev, ISC license), keyed by canonical id so the picker lists
+// each icon once rather than once per legacy alias. See the plugin in vite.config.ts.
+import lucideIcons from "virtual:lucide-icons";
 
-const iconModules = import.meta.glob<IconNode>("../node_modules/lucide/dist/esm/icons/*.mjs", {
-  eager: true,
-  import: "default",
-});
+type IconNode = (typeof lucideIcons)[string];
 
-const iconNodes = new Map<string, IconNode>(
-  Object.entries(iconModules).map(([path, node]) => [path.slice(path.lastIndexOf("/") + 1, -".mjs".length), node]),
-);
+const iconNodes = new Map<string, IconNode>(Object.entries(lucideIcons));
 
 /** Every Lucide icon id, sorted alphabetically. */
 export const iconIds = Array.from(iconNodes.keys()).sort();
