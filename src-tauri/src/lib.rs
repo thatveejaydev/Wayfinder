@@ -34,6 +34,7 @@ mod keyboard;
 mod mouse_hotkey;
 #[cfg(target_os = "windows")]
 mod terminal_launch;
+mod tile_actions;
 mod tile_icons;
 mod workspaces;
 
@@ -943,6 +944,60 @@ fn end_tile_drag(app: AppHandle, state: State<'_, Mutex<DragSession>>) -> Result
         .map_err(|e| e.to_string())
 }
 
+/// What the settings window needs to show a tile in its Modify tab.
+fn tile_selection_payload(
+    state: &State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: &str,
+    id: &str,
+    level: u8,
+) -> Result<serde_json::Value, String> {
+    let store = state.lock().map_err(|error| error.to_string())?;
+    let item = store
+        .edit_shortcuts(workspace_id)?
+        .iter()
+        .find(|item| item.id == id)
+        .ok_or("Shortcut not found")?;
+    Ok(serde_json::json!({
+        "item": {
+            "id": item.id,
+            "name": item.name,
+            "kind": item.kind,
+            "path": item.path,
+            "text": item.text,
+            "color": item.color,
+            "emoji": item.emoji,
+        },
+        "level": level,
+        "workspaceId": workspace_id,
+    }))
+}
+
+/// A tile to select once Settings finishes opening (see `edit_tile_in_settings`).
+static PENDING_SELECTION: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+
+/// Opens Settings with `id` already selected in the Modify tab.
+#[tauri::command]
+fn edit_tile_in_settings(
+    app: AppHandle,
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
+    id: String,
+    level: u8,
+) -> Result<(), String> {
+    let payload = tile_selection_payload(&state, &workspace_id, &id, level)?;
+    if let Some(editor) = app
+        .get_webview_window("editor")
+        .filter(|editor| editor.is_visible().unwrap_or(false))
+    {
+        app.emit_to("editor", "tile-selection-changed", payload)
+            .map_err(|error| error.to_string())?;
+        return editor.set_focus().map_err(|error| error.to_string());
+    }
+    *PENDING_SELECTION.lock().map_err(|error| error.to_string())? = Some(payload);
+    open_settings(&app);
+    Ok(())
+}
+
 #[tauri::command]
 fn select_tile_for_edit(
     app: AppHandle,
@@ -957,27 +1012,7 @@ fn select_tile_for_edit(
     if !editor.is_visible().map_err(|error| error.to_string())? {
         return Ok(());
     }
-    let payload = {
-        let store = state.lock().map_err(|error| error.to_string())?;
-        let item = store
-            .edit_shortcuts(&workspace_id)?
-            .iter()
-            .find(|item| item.id == id)
-            .ok_or("Shortcut not found")?;
-        serde_json::json!({
-            "item": {
-                "id": item.id,
-                "name": item.name,
-                "kind": item.kind,
-                "path": item.path,
-                "text": item.text,
-                "color": item.color,
-                "emoji": item.emoji,
-            },
-            "level": level,
-            "workspaceId": workspace_id,
-        })
-    };
+    let payload = tile_selection_payload(&state, &workspace_id, &id, level)?;
     app.emit_to("editor", "tile-selection-changed", payload)
         .map_err(|error| error.to_string())?;
     if editor.is_minimized().map_err(|error| error.to_string())? {
@@ -1271,7 +1306,12 @@ fn show_settings(app: &AppHandle) -> Result<(), String> {
     editor.set_focus().map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn_blocking(collect_installed_apps);
     app.emit_to("main", "editor-opened", ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let pending = PENDING_SELECTION.lock().ok().and_then(|mut pending| pending.take());
+    if let Some(payload) = pending {
+        let _ = app.emit_to("editor", "tile-selection-changed", payload);
+    }
+    Ok(())
 }
 
 /// Called by the settings page once it has loaded.
@@ -1292,6 +1332,9 @@ fn present_settings(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn hide_settings(app: AppHandle) -> Result<(), String> {
     SETTINGS_OPEN.store(false, Ordering::SeqCst);
+    if let Ok(mut pending) = PENDING_SELECTION.lock() {
+        *pending = None;
+    }
     if let Some(editor) = app.get_webview_window("editor") {
         editor.hide().map_err(|error| error.to_string())?;
     }
@@ -1838,6 +1881,8 @@ pub fn run() {
             begin_tile_drag,
             end_tile_drag,
             select_tile_for_edit,
+            edit_tile_in_settings,
+            tile_actions::tile_action,
             open_tile_form
         ])
         .run(tauri::generate_context!())

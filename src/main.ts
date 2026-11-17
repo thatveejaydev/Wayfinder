@@ -680,6 +680,178 @@ function showToast(message: string, isError = false) {
   toastTimer = window.setTimeout(() => node.classList.remove("visible"), 3200);
 }
 
+type MenuEntry =
+  | "separator"
+  | { label: string; run: () => void | Promise<void>; danger?: boolean; confirm?: string };
+
+const diskKinds = new Set<Shortcut["kind"]>(["folder", "app", "file", "image", "pdf", "video", "audio"]);
+let tileMenu: HTMLDivElement | null = null;
+
+function closeTileMenu() {
+  tileMenu?.remove();
+  tileMenu = null;
+}
+
+function descendantCount(id: string): number {
+  let count = 0;
+  const pending = [id];
+  while (pending.length) {
+    const parent = pending.pop()!;
+    for (const item of shortcuts) {
+      if (item.parentId === parent) {
+        count += 1;
+        pending.push(item.id);
+      }
+    }
+  }
+  return count;
+}
+
+async function runTileAction(item: Shortcut, workspaceId: string, action: string, then: "dismiss" | string) {
+  closeTileMenu();
+  try {
+    await invoke("tile_action", { workspaceId, id: item.id, action });
+    if (then === "dismiss") {
+      await invoke("dismiss_palette");
+      activeSubmenus = [];
+      render();
+    } else {
+      showToast(then);
+    }
+  } catch (error) {
+    showToast(String(error), true);
+  }
+}
+
+async function editTileFromMenu(item: Shortcut, workspaceId: string) {
+  closeTileMenu();
+  selectedTileId = item.id;
+  try {
+    await invoke("edit_tile_in_settings", { workspaceId, id: item.id, level: ringDepth(item.parentId ?? null) });
+  } catch (error) {
+    showToast(String(error), true);
+  }
+}
+
+async function removeTileFromMenu(item: Shortcut, workspaceId: string) {
+  closeTileMenu();
+  const descendants = descendantCount(item.id);
+  try {
+    await invoke("remove_shortcut", {
+      workspaceId, id: item.id, confirmedDescendants: descendants > 0 ? descendants : undefined,
+    });
+    await refreshWorkspacePalette();
+    showToast(`Removed ${shortcutName(item)}`);
+  } catch (error) {
+    showToast(String(error), true);
+  }
+}
+
+function tileMenuEntries(item: Shortcut, level: number, workspaceId: string): MenuEntry[] {
+  const missing = missingTileIds.has(item.id);
+  const hasDiskTarget = diskKinds.has(item.kind);
+  const open = (shiftKey: boolean) => () => {
+    closeTileMenu();
+    return activate(item, level, shiftKey, workspaceId);
+  };
+  const entries: MenuEntry[] = [];
+  if (missing) entries.push({ label: "Fix path…", run: () => editTileFromMenu(item, workspaceId) });
+  entries.push({ label: item.kind === "text" ? "Copy text" : "Open", run: open(false) });
+  if (item.kind === "folder") entries.push({ label: "Open in terminal", run: open(true) });
+  if (item.kind === "text") {
+    entries.push({ label: "Paste into previous window", run: () => runTileAction(item, workspaceId, "paste-previous", "dismiss") });
+  }
+  if (item.kind === "app" && !missing) {
+    entries.push({ label: "Run as administrator", run: () => runTileAction(item, workspaceId, "run-as-admin", "dismiss") });
+  }
+  if (hasDiskTarget && item.kind !== "folder" && item.kind !== "app" && !missing) {
+    entries.push({ label: "Open with…", run: () => runTileAction(item, workspaceId, "open-with", "dismiss") });
+  }
+  if (hasDiskTarget && !missing) {
+    entries.push({
+      label: item.kind === "app" ? "Open file location" : "Show in Explorer",
+      run: () => runTileAction(item, workspaceId, "reveal", "dismiss"),
+    });
+  }
+  if (hasDiskTarget) {
+    entries.push({ label: "Copy path", run: () => runTileAction(item, workspaceId, "copy-path", "Path copied") });
+  }
+  if (item.kind === "webpage") {
+    entries.push({ label: "Copy link", run: () => runTileAction(item, workspaceId, "copy-path", "Link copied") });
+  }
+  entries.push("separator", { label: "Edit…", run: () => editTileFromMenu(item, workspaceId) });
+  const descendants = descendantCount(item.id);
+  entries.push({
+    label: "Remove",
+    danger: true,
+    confirm: descendants > 0 ? `Remove with ${descendants} ${descendants === 1 ? "tile" : "tiles"}?` : "Click again to remove",
+    run: () => removeTileFromMenu(item, workspaceId),
+  });
+  return entries;
+}
+
+function showTileMenu(item: Shortcut, level: number, x: number, y: number) {
+  closeTileMenu();
+  const menu = document.createElement("div");
+  menu.className = "tile-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", `${shortcutName(item)} actions`);
+  for (const entry of tileMenuEntries(item, level, workspaceList.activeId)) {
+    if (entry === "separator") {
+      const line = document.createElement("div");
+      line.className = "tile-menu-separator";
+      line.setAttribute("role", "separator");
+      menu.append(line);
+      continue;
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "menuitem");
+    button.textContent = entry.label;
+    button.classList.toggle("danger", Boolean(entry.danger));
+    let armed = false;
+    button.addEventListener("click", () => {
+      if (entry.confirm && !armed) {
+        armed = true;
+        button.textContent = entry.confirm;
+        button.classList.add("armed");
+        return;
+      }
+      void entry.run();
+    });
+    menu.append(button);
+  }
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+  document.body.append(menu);
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - rect.width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - rect.height - 4))}px`;
+  tileMenu = menu;
+  menu.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+}
+
+function handleTileMenuKey(event: KeyboardEvent): boolean {
+  const menu = tileMenu;
+  if (!menu) return false;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeTileMenu();
+    return true;
+  }
+  const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>("button"));
+  const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    buttons[(Math.max(index, 0) + (index < 0 ? 0 : step) + buttons.length) % buttons.length]?.focus({ preventScroll: true });
+    return true;
+  }
+  if (event.key === "Tab") closeTileMenu();
+  // Enter and Space activate the focused menu item natively.
+  return event.key !== "Tab";
+}
+
 function showSettingsNotification(message: string, isError = false) {
   settingsNotification.textContent = message;
   settingsNotification.classList.toggle("error", isError);
@@ -2956,6 +3128,7 @@ async function openPalette() {
   if (openingPalette) return;
   openingPalette = true;
   try {
+    closeTileMenu();
     closeWorkspacePicker();
     resetPaletteSearch();
     if (!tileDraft) activeSubmenus = [];
@@ -3169,6 +3342,19 @@ async function start() {
         void invoke("dismiss_palette");
       }
     });
+    document.addEventListener("pointerdown", (event) => {
+      if (tileMenu && !tileMenu.contains(event.target as Node)) closeTileMenu();
+    }, true);
+    document.addEventListener("contextmenu", (event) => event.preventDefault());
+    app.addEventListener("contextmenu", (event) => {
+      closeTileMenu();
+      if (editing || busy || tileDraft || tileReorder || incomingTileKind || externalDragging
+        || workspaceHighlight !== null || searchQuery.trim()) return;
+      const target = (event.target as Element).closest<HTMLElement>(".shortcut, .segment");
+      const item = shortcuts.find((entry) => entry.id === target?.dataset.id);
+      if (!target || !item || target.classList.contains("draft-segment")) return;
+      showTileMenu(item, Number(target.dataset.level ?? 0), event.clientX, event.clientY);
+    });
     document.addEventListener("pointermove", previewTileReorder);
     document.addEventListener("pointerup", finishTileReorder);
     app.addEventListener("lostpointercapture", (event) => {
@@ -3252,6 +3438,7 @@ async function start() {
 
 document.addEventListener("keydown", (event) => {
   if (event.isComposing || document.querySelector(".backup-preview[open]")) return;
+  if (!isEditorWindow && handleTileMenuKey(event)) return;
   if (!isEditorWindow && !event.defaultPrevented && !event.ctrlKey && !event.altKey && !event.metaKey
     && event.key === "Tab" && workspaceList.workspaces.length && !busy && !workspaceChanging && !tileDraft
     && !incomingTileKind && !externalDragging && !tileReorder) {

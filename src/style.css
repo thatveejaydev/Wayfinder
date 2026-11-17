@@ -370,6 +370,41 @@ button { font: inherit; }
 
 .shortcut.single-content { justify-content: center; }
 
+/* Right-click menu for a tile. */
+.tile-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--palette-custom-border, var(--palette-border, #3b3b3b));
+  border-radius: 10px;
+  color: var(--palette-background-text, #f5f7f9);
+  background: var(--palette-background, #181818);
+  box-shadow: 0 8px 24px rgb(0 0 0 / .4);
+  font-size: 13px;
+}
+.tile-menu button {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tile-menu button:is(:hover, :focus-visible) {
+  outline: none;
+  color: var(--palette-highlight-text, #000);
+  background: var(--palette-highlight, #5ba9f2);
+}
+.tile-menu button.danger { color: #ff8a8a; }
+.tile-menu button.danger:is(:hover, :focus-visible) { color: #fff; background: #b42323; }
+.tile-menu button.armed { color: #fff; background: #991b1b; }
+.tile-menu-separator { height: 1px; margin: 4px 6px; background: var(--palette-custom-border, var(--palette-border, #3b3b3b)); }
+
 /* Tiles whose file, folder or app is gone: dimmed, dashed, with a warning badge. */
 .shortcut.missing-target > :not(.missing-badge) { opacity: .5; }
 .segment.missing-target > .segment-surface { stroke-dasharray: 6 4; }
