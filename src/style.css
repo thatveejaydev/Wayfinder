@@ -370,6 +370,24 @@ button { font: inherit; }
 
 .shortcut.single-content { justify-content: center; }
 
+/* Tiles whose file, folder or app is gone: dimmed, dashed, with a warning badge. */
+.shortcut.missing-target > :not(.missing-badge) { opacity: .5; }
+.segment.missing-target > .segment-surface { stroke-dasharray: 6 4; }
+.missing-badge {
+  position: absolute;
+  top: 2px;
+  right: 6%;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #412402;
+  background: #ef9f27;
+  font: 700 11px/1 system-ui, sans-serif;
+  pointer-events: none;
+}
+
 .submenu-icon {
   display: grid;
   place-items: center;
@@ -957,6 +975,30 @@ button.tile-color-swatch, .tile-shade { cursor: pointer; }
 .tile-save { border-color: transparent; color: var(--settings-on-accent); background: var(--settings-accent); font-weight: 600; }
 .tile-save:hover:not(:disabled) { filter: brightness(1.1); }
 :is(.tile-save, .tile-remove):disabled { opacity: .55; cursor: default; }
+.tile-missing {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid #ef9f27;
+  border-radius: 8px;
+  color: var(--settings-text);
+  background: color-mix(in srgb, #ef9f27 14%, transparent);
+  font-size: 12px;
+}
+.tile-missing[hidden] { display: none; }
+.tile-fix-path {
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid var(--settings-line);
+  border-radius: 7px;
+  color: var(--settings-text);
+  background: var(--settings-field);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tile-fix-path:hover:not(:disabled) { background: var(--settings-hover); }
 .tile-form-error { color: var(--settings-error); font-size: 12px; }
 .tile-form-error:empty { margin: 0; height: 0; }
 

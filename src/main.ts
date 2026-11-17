@@ -331,6 +331,27 @@ function loadShortcutIcon(item: Shortcut, container: HTMLElement, workspaceId: s
   });
 }
 
+/** Active-workspace tiles whose file, folder or app no longer exists on disk. */
+let missingTileIds = new Set<string>();
+let missingCheck = 0;
+
+async function refreshMissingTiles() {
+  if (isEditorWindow) return;
+  const request = ++missingCheck;
+  const workspaceId = workspaceList.activeId;
+  if (!workspaceId) return;
+  let ids: string[];
+  try {
+    ids = await invoke<string[]>("missing_tile_ids", { workspaceId });
+  } catch {
+    return;
+  }
+  if (request !== missingCheck || workspaceId !== workspaceList.activeId) return;
+  if (ids.length === missingTileIds.size && ids.every((id) => missingTileIds.has(id))) return;
+  missingTileIds = new Set(ids);
+  if (app.querySelector(".stage")) render();
+}
+
 function childrenOf(parentId: string | null): Shortcut[] {
   return shortcuts.filter((item) => (item.parentId ?? null) === parentId);
 }
@@ -1193,10 +1214,11 @@ function appendTile(
   const focusesSubmenu = !editing && item.kind === "submenu";
   const action = focusesSubmenu ? "Open" : previewWorkspaceId ? "Preview" : editing ? "Edit" : item.kind === "text" ? "Copy" : "Open";
   const location = result ? ` · ${result.breadcrumb}` : "";
-  const labelText = `${action} ${name}${location}`;
+  const missing = !draft && !previewWorkspaceId && workspaceId === workspaceList.activeId && missingTileIds.has(item.id);
+  const labelText = `${action} ${name}${location}${missing ? " (target not found)" : ""}`;
   const searchKey = result ? `search:${result.id}` : undefined;
   const poolKey = searchKey ?? `${level}:${item.id}`;
-  const signature = `${item.kind}\0${item.name}\0${item.path}\0${item.text ?? ""}\0${item.color ?? ""}\0${item.emoji ?? ""}\0${item.preview ?? ""}\0${editing ? 1 : 0}\0${searching ? 1 : 0}`;
+  const signature = `${item.kind}\0${item.name}\0${item.path}\0${item.text ?? ""}\0${item.color ?? ""}\0${item.emoji ?? ""}\0${item.preview ?? ""}\0${editing ? 1 : 0}\0${searching ? 1 : 0}\0${missing ? 1 : 0}`;
 
   const entry = draft || previewWorkspaceId ? undefined : tileElementPool.get(poolKey);
   if (entry && entry.signature === signature) {
@@ -1253,12 +1275,14 @@ function appendTile(
   if (result) path.dataset.searchId = result.id;
   path.classList.toggle("selected-tile", selected);
   path.classList.toggle("search-selected", searchSelected);
+  path.classList.toggle("missing-target", missing);
 
   const button = document.createElement("button");
   button.className = `shortcut${level ? ` child-shortcut level-${level}` : ""}`;
   const emoji = item.kind === "submenu" ? item.emoji : null;
   button.classList.toggle("single-content", item.kind === "text" || (item.kind === "submenu" && !emoji) || !item.name);
   button.classList.toggle("active-submenu", activeSubmenu);
+  button.classList.toggle("missing-target", missing);
   button.dataset.id = item.id;
   button.dataset.level = String(level);
   button.type = "button";
@@ -1283,7 +1307,7 @@ function appendTile(
   const draftHasValue = draft && Boolean(item.path || item.emoji || item.text);
   if (draft && !draftHasValue) tileIcon = "";
   const showLabel = item.name || (draft ? draftHasValue && !item.emoji : item.kind === "text" || searching);
-  button.innerHTML = `${tileIcon}${showLabel ? '<span class="shortcut-label"></span>' : ""}${result ? '<span class="shortcut-workspace"></span>' : ""}`;
+  button.innerHTML = `${tileIcon}${showLabel ? '<span class="shortcut-label"></span>' : ""}${result ? '<span class="shortcut-workspace"></span>' : ""}${missing ? '<span class="missing-badge" aria-hidden="true">!</span>' : ""}`;
   if (emoji) showIcon(button.querySelector<HTMLElement>(".submenu-icon")!, emoji);
   if (result) button.querySelector<HTMLElement>(".shortcut-workspace")!.textContent = result.workspace.name;
   if (!draft && !item.preview && (item.kind === "app" || item.kind === "webpage" || item.kind === "image")) {
@@ -2003,6 +2027,10 @@ function selectedTileForm(selection: TileSelection) {
       </select>
       <label for="edit-tile-name">Name <small class="tile-name-hint" hidden></small></label>
       <input id="edit-tile-name" name="name" type="text" maxlength="80" autocomplete="off" />
+      <div class="tile-missing" role="status" hidden>
+        <span>Can't find this target. It may have been moved, renamed or deleted.</span>
+        <button class="tile-fix-path" type="button">Fix path…</button>
+      </div>
       <div class="tile-fields"></div>
       ${tileColorField()}
       <div class="tile-form-error" role="alert"></div>
@@ -2043,7 +2071,40 @@ function bindSelectedTileForm(form: HTMLFormElement, selection: TileSelection) {
   const selectionIcon = app.querySelector<HTMLElement>("[data-selection-icon]")!;
   const values = new Map<EditableTileKind, string>([[kind, kind === "text" ? item.text ?? "" : kind === "submenu" ? item.emoji ?? "" : item.path]]);
   let value: HTMLInputElement | HTMLTextAreaElement | null;
+  const missingNotice = form.querySelector<HTMLElement>(".tile-missing")!;
+  const fixPath = missingNotice.querySelector<HTMLButtonElement>(".tile-fix-path")!;
+  const originalKind = kind;
+  let targetMissing = false;
+  const updateMissingNotice = () => {
+    missingNotice.hidden = !(targetMissing && kind === originalKind);
+  };
+  if (item.path && ["folder", "app", "file"].includes(originalKind)) {
+    void invoke<string[]>("missing_tile_ids", { workspaceId: selection.workspaceId })
+      .then((ids) => {
+        if (!form.isConnected) return;
+        targetMissing = ids.includes(item.id);
+        updateMissingNotice();
+      })
+      .catch(() => {});
+  }
+  fixPath.addEventListener("click", async () => {
+    fixPath.disabled = true;
+    error.textContent = "";
+    try {
+      const picked = await invoke<string | null>("pick_tile_path", { kind: originalKind });
+      if (picked && form.isConnected && value) {
+        value.value = picked;
+        value.dispatchEvent(new Event("input"));
+        form.requestSubmit();
+      }
+    } catch (failure) {
+      error.textContent = String(failure);
+    } finally {
+      fixPath.disabled = false;
+    }
+  });
   const renderFields = () => {
+    updateMissingNotice();
     selectionKind.textContent = type.selectedOptions[0]?.textContent ?? "";
     selectionIcon.dataset.kind = kind;
     selectionIcon.innerHTML = settingsIcon(kind);
@@ -2909,6 +2970,7 @@ async function openPalette() {
     await invoke("present_palette");
     app.querySelector<HTMLInputElement>("#palette-search")?.focus({ preventScroll: true });
     for (const animation of entrance) animation.play();
+    void refreshMissingTiles();
   } finally {
     openingPalette = false;
   }
@@ -2961,8 +3023,10 @@ function applyWorkspacePalette(next: WorkspacePalette, restored = false) {
     }
   }
   shortcuts = next.shortcuts;
+  if (switched) missingTileIds = new Set();
   if (switched && !workspaceChanging && workspaceHighlight !== null) closeWorkspacePicker(true);
   else if (app.querySelector(".stage")) render();
+  void refreshMissingTiles();
 }
 
 async function refreshWorkspacePalette() {

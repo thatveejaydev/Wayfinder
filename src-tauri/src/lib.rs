@@ -1016,6 +1016,37 @@ fn list_shortcuts(
     Ok(store.edit_shortcuts(&workspace_id)?.clone())
 }
 
+/// Tile kinds whose `path` points at something on disk that can go missing.
+fn has_disk_target(kind: &str) -> bool {
+    matches!(kind, "folder" | "app" | "file" | "image" | "pdf" | "video" | "audio")
+}
+
+/// IDs of tiles in a workspace whose file, folder or app no longer exists.
+#[tauri::command]
+async fn missing_tile_ids(
+    state: State<'_, Mutex<WorkspaceStore>>,
+    workspace_id: String,
+) -> Result<Vec<String>, String> {
+    let targets: Vec<(String, String)> = {
+        let store = state.lock().map_err(|e| e.to_string())?;
+        store
+            .shortcuts(&workspace_id)?
+            .iter()
+            .filter(|item| has_disk_target(&item.kind) && !item.path.is_empty())
+            .map(|item| (item.id.clone(), item.path.clone()))
+            .collect()
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        targets
+            .into_iter()
+            .filter(|(_, path)| !matches!(Path::new(path).try_exists(), Ok(true)))
+            .map(|(id, _)| id)
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn shortcut_icon(
     id: String,
@@ -1782,6 +1813,7 @@ pub fn run() {
             backup::discard_backup,
             backup::restore_backup,
             list_shortcuts,
+            missing_tile_ids,
             shortcut_icon,
             add_paths,
             remove_shortcut,
