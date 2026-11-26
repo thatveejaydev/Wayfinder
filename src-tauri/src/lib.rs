@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs,
-    io::{self, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -268,40 +267,6 @@ impl Appearance {
         }
         self
     }
-}
-
-fn import_previous_data(dir: &Path) -> io::Result<()> {
-    let Some(parent) = dir.parent() else {
-        return Ok(());
-    };
-    let legacy_dir = parent.join("app.radial.palette");
-    for name in ["shortcuts.json", "appearance.json", "palette-hotkey.txt"] {
-        let destination = dir.join(name);
-        if destination.try_exists()? {
-            continue;
-        }
-        let contents = match fs::read(legacy_dir.join(name)) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
-        };
-        fs::create_dir_all(dir)?;
-        let mut file = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error),
-        };
-        if let Err(error) = file.write_all(&contents) {
-            drop(file);
-            let _ = fs::remove_file(&destination);
-            return Err(error);
-        }
-    }
-    Ok(())
 }
 
 fn appearance_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1779,7 +1744,6 @@ pub fn run() {
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             backup::recover_interrupted_restore(&app_data_dir)?;
-            import_previous_data(&app_data_dir)?;
             tile_icons::init(app_data_dir.join("icon-cache"));
             #[cfg(all(debug_assertions, target_os = "windows"))]
             watch_dev_supervisor(app.handle().clone());

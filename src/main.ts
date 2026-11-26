@@ -1857,7 +1857,7 @@ function render(transition?: "opening" | "search" | "workspace-preview") {
     ${selectedResult ? '<span class="search-breadcrumb"></span>' : ""}
   </div>` : focused ? `<div class="focus-controls" style="--focus-width: ${appearance.innerRadius * 1.6 / 620 * 100}%">
     <span class="focus-title"></span>
-    <button class="focus-back" type="button">Back</button>
+    <button class="focus-back" type="button" aria-label="Back" title="Back">${iconSvg("arrow-left", "focus-back-icon", 2)}</button>
   </div>` : ""}${!searching && !roots.length ? '<div class="empty-prompt"><span class="drop-arrow">↓</span><span>DRAG & DROP<br/>NEW ITEMS HERE</span></div>' : ""}`;
   palette.insertBefore(centerTemplate.content, toast);
 
